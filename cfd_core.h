@@ -5,6 +5,12 @@
 #define CFD_LIB
 #endif
 
+#if defined(__linux__) || defined(__unix__)
+    #ifndef _GNU_SOURCE
+        #define _GNU_SOURCE
+    #endif
+#endif
+
 #include <stdint.h>
 #include <stdarg.h>
 #include <string.h>
