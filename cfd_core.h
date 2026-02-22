@@ -11,6 +11,15 @@
     #endif
 #endif
 
+#if defined(_WIN32) || defined(_WIN64)
+    #include <windows.h>
+    #define PATH_MAX MAX_PATH
+#elif defined(__unix__)
+    #include <limits.h>
+#else
+    #define PATH_MAX 512
+#endif
+
 #include <stdint.h>
 #include <stdarg.h>
 #include <string.h>
@@ -62,12 +71,24 @@ typedef struct CFD_Arena {
     b32 is_mmaped;
 } CFD_Arena;
 
+typedef struct CFD_File {
+    u8 *buffer;
+    u64 size;
+    u64 cur;
+} CFD_File;
+
+typedef struct Str8 {
+    u8 *buffer;
+    u64 len;
+} Str8;
+
+
 // LOGGING
 typedef void (*CFD_Log_Fn)(CFD_Log_Level level, const char *fmt, va_list args);
 
-#define cfd_info(fmt, ...)  cfd_log(CFD_LOG_LEVEL_INFO, fmt, ##__VA_ARGS__)
-#define cfd_warn(fmt, ...)  cfd_log(CFD_LOG_LEVEL_WARNING, fmt, ##__VA_ARGS__)
-#define cfd_error(fmt, ...) cfd_log(CFD_LOG_LEVEL_ERROR, fmt, ##__VA_ARGS__)
+#define cfd_info(...)  cfd_log(CFD_LOG_LEVEL_INFO, __VA_ARGS__)
+#define cfd_warn(...)  cfd_log(CFD_LOG_LEVEL_WARNING, __VA_ARGS__)
+#define cfd_error(...) cfd_log(CFD_LOG_LEVEL_ERROR, __VA_ARGS__)
 
 CFD_LIB void cfd_log(CFD_Log_Level level, const char *fmt, ...);
 CFD_LIB void cfd_set_logger(CFD_Log_Fn fn);
@@ -117,6 +138,25 @@ static force_inline void *cfd_arena_alloc_zero(CFD_Arena *arena, u64 size) {
 #define cfd_arena_push_array_zero(arena, type, count) \
     (type *)cfd_arena_alloc_zero_aligned((arena), sizeof(type) * (count), _Alignof(type))
 
+
+// FILE HANDLING
+
+CFD_LIB b32 cfd_file_slurp(char *filename, CFD_File *file);
+CFD_LIB b32 cfd_file_free(CFD_File *file);
+CFD_LIB void cfd_dirname(char *path, char *dest);
+CFD_LIB Str8 cfd_file_readline(CFD_File *file);
+
+#define IS_CFD_FILE_EOF(f) (f->cur >= f->size)
+
+
+// STRING HANDLING
+
+#define Str8_Fmt "%.*s"
+#define Str8_Arg(s) (int)(s).len, (s).buffer
+
+static force_inline Str8 Str8_From_Zstr(u8 *txt, u64 len) { Str8 res = { (u8*)txt, len }; return res; }
+#define Str8_Lit(s) Str8_From_Zstr((u8 *)s, sizeof(s) - 1)
+
 #ifdef CFD_LIB_IMPLEMENTATION
 
 #include <stdio.h>
@@ -124,6 +164,10 @@ static force_inline void *cfd_arena_alloc_zero(CFD_Arena *arena, u64 size) {
 
 #ifdef __unix__
 #include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 static CFD_Log_Fn g_logger = cfd_default_logger;
@@ -210,6 +254,155 @@ CFD_LIB b32 cfd_arena_destroy(CFD_Arena *arena) {
     arena->cap = 0;
     arena->is_mmaped = false;
     return true;
+}
+
+CFD_LIB b32 cfd_file_slurp(char *filename, CFD_File *file) {
+#ifdef __unix__
+    int fd = open(filename, O_RDONLY);
+    if (fd == -1) {
+        cfd_error("failed to open file '%s' via open(): %s", filename, strerror(errno));
+        return false;
+    }
+
+    struct stat sb;
+    if (fstat(fd, &sb) == -1) {
+        cfd_error("fstat() failed: %s", strerror(errno));
+        close(fd);
+        return false;
+    }
+
+    file->size = sb.st_size;
+
+    file->buffer = (u8 *)mmap(NULL, file->size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (file->buffer == MAP_FAILED) {
+        cfd_error("mmap() failed: %s", strerror(errno));
+        close(fd);
+        return false;
+    }
+
+    close(fd);
+
+#else
+
+    FILE *f = fopen(filename, "rb");
+    if (!f) {
+        cfd_error("fopen() failed: %s", strerror(errno));
+        return false;
+    }
+
+    fseek(f, 0, SEEK_END);
+    file->size = ftell(f);
+    rewind(f);
+
+    file->buffer = (u8 *)malloc(file->size);
+    if (!file->buffer) {
+        cfd_error("malloc() failed: %s", strerror(errno));
+        fclose(f);
+        return false;
+    }
+
+    u64 bytes_read = fread(file->buffer, 1, file->size, f);
+    if (bytes_read != file->size) {
+        cfd_error("fread() failed: %s", strerror(errno));
+        free(file->buffer);
+        fclose(f);
+        return false;
+    }
+
+    fclose(f);
+
+#endif /* __unix__ */
+
+    file->cur = 0;
+
+    return true;
+}
+
+CFD_LIB b32 cfd_file_free(CFD_File *file) {
+#ifdef __unix__
+    if (munmap(file->buffer, file->size) != 0) {
+        cfd_error("munmap() failed: could not unmap mapped file: %s", strerror(errno));
+        return false;
+    }
+#else
+    free(file->buffer);
+#endif
+
+    return true;
+}
+
+CFD_LIB void cfd_dirname(char *path, char *dest) {
+    if (!path || !dest) {
+        cfd_error("path or destination is null in cfd_dirname()!");
+        return;
+    }
+
+    u64 path_len = strlen(path);
+    if (path_len == 0) {
+        dest[0] = '.';
+        dest[1] = '\0';
+        return;
+    }
+
+    if (path_len > PATH_MAX) {
+        cfd_error("The length of path(%zu) is longer than OS PATH_MAX(%zu)!", path_len, PATH_MAX);
+        return;
+    }
+
+    s64 last_slash_index = -1;
+    for (s64 i = (s64)path_len - 1; i >= 0; --i) {
+        if (path[i] == '/'
+#ifdef _WIN32
+            || path[i] == '\\'
+#endif
+           ) {
+            last_slash_index = i;
+            break;
+        }
+    }
+
+    if (last_slash_index > 0) {
+        memcpy(dest, path, last_slash_index);
+        dest[last_slash_index] = '\0';
+    } else if (last_slash_index == 0) {
+        dest[0] = path[0];
+        dest[1] = '\0';
+    } else {
+        dest[0] = '.';
+        dest[1] = '\0';
+    }
+}
+
+CFD_LIB Str8 cfd_file_readline(CFD_File *file) {
+    if (file->cur >= file->size)
+        return (Str8){0};
+
+    Str8 line;
+    line.buffer = file->buffer + file->cur;
+    line.len = 0;
+
+    while (file->cur < file->size) {
+        u8 ch = file->buffer[file->cur];
+
+        if (ch == '\r') {
+            if (file->cur + 1 < file->size && file->buffer[file->cur + 1] == '\n')
+                file->cur += 2;
+            else
+                file->cur++;
+
+            break;
+        }
+
+        if (ch == '\n') {
+            file->cur++;
+            break;
+        }
+
+        line.len++;
+        file->cur++;
+    }
+
+    return line;
 }
 
 #endif /* CFD_LIB_IMPLEMENTATION */
