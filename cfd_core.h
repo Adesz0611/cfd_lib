@@ -5,6 +5,10 @@
 #define CFD_LIB
 #endif
 
+#ifndef CFD_INTERNAL
+#define CFD_INTERNAL static
+#endif
+
 #if defined(__linux__) || defined(__unix__)
     #ifndef _GNU_SOURCE
         #define _GNU_SOURCE
@@ -49,7 +53,9 @@ typedef u32 b32;
 #define MB(x) (KB(x) * 1024ULL)
 #define GB(x) (MB(x) * 1024ULL)
 
+#ifndef NULL
 #define NULL ((void *)0)
+#endif
 
 #ifdef _MSC_VER
 #define force_inline __forceinline
@@ -82,6 +88,11 @@ typedef struct Str8 {
     u64 len;
 } Str8;
 
+#define CFD_CHECK_NULL(ptr) \
+    if (!(ptr)) { \
+        cfd_error("%s: parameter '%s' is NULL!", __func__, #ptr); \
+        return false; \
+    }
 
 // LOGGING
 typedef void (*CFD_Log_Fn)(CFD_Log_Level level, const char *fmt, va_list args);
@@ -143,7 +154,7 @@ static force_inline void *cfd_arena_alloc_zero(CFD_Arena *arena, u64 size) {
 
 CFD_LIB b32 cfd_file_slurp(char *filename, CFD_File *file);
 CFD_LIB b32 cfd_file_free(CFD_File *file);
-CFD_LIB void cfd_dirname(char *path, char *dest);
+CFD_LIB void cfd_dirname(const char *path, char *dest);
 CFD_LIB Str8 cfd_file_readline(CFD_File *file);
 
 #define IS_CFD_FILE_EOF(f) (f->cur >= f->size)
@@ -331,7 +342,7 @@ CFD_LIB b32 cfd_file_free(CFD_File *file) {
     return true;
 }
 
-CFD_LIB void cfd_dirname(char *path, char *dest) {
+CFD_LIB void cfd_dirname(const char *path, char *dest) {
     if (!path || !dest) {
         cfd_error("path or destination is null in cfd_dirname()!");
         return;
@@ -374,8 +385,10 @@ CFD_LIB void cfd_dirname(char *path, char *dest) {
 }
 
 CFD_LIB Str8 cfd_file_readline(CFD_File *file) {
-    if (file->cur >= file->size)
-        return (Str8){0};
+    if (file->cur >= file->size) {
+        Str8 result = { NULL, 0 };
+        return result;
+    }
 
     Str8 line;
     line.buffer = file->buffer + file->cur;

@@ -77,12 +77,19 @@ typedef struct {
     char dirname[PATH_MAX];
 } Ensight_Case;
 
-CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, char *filename, CFD_File *file);
-CFD_LIB Ensight_SectionType ensight_get_section_type(Str8 s);
+CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const char *filename, CFD_File *file);
+
+CFD_INTERNAL Ensight_SectionType ensight_get_section_type(Str8 s);
+CFD_INTERNAL Str8 cfd_file_ensight_readline(CFD_File *file);
 
 #ifdef CFD_ENSIGHT_GOLD_IMPLEMENTATION
 
-CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, char *filename, CFD_File *f) {
+CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const char *filename, CFD_File *f) {
+    CFD_CHECK_NULL(arena);
+    CFD_CHECK_NULL(encase);
+    CFD_CHECK_NULL(filename);
+    CFD_CHECK_NULL(f);
+
     encase->geometry = NULL;
     encase->variable = NULL;
     encase->times = NULL;
@@ -95,7 +102,7 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, char *fil
     Ensight_SectionType type = ENSIGHT_NOSECTION;
 
     while(!IS_CFD_FILE_EOF(f)) {
-        Str8 line = cfd_file_readline(f);
+        Str8 line = cfd_file_ensight_readline(f);
         if (line.buffer == NULL) {
             cfd_error("error while reading a line!");
             return false;
@@ -115,7 +122,7 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, char *fil
     return true;
 }
 
-CFD_LIB Ensight_SectionType ensight_get_section_type(Str8 s) {
+CFD_INTERNAL Ensight_SectionType ensight_get_section_type(Str8 s) {
     if (s.len == 0) return ENSIGHT_NOSECTION;
 
     switch(s.buffer[0]) {
@@ -146,6 +153,52 @@ CFD_LIB Ensight_SectionType ensight_get_section_type(Str8 s) {
     }
 
     return ENSIGHT_NOSECTION;
+}
+
+CFD_INTERNAL Str8 cfd_file_ensight_readline(CFD_File *file) {
+    if (file->cur >= file->size) {
+        Str8 result = { NULL, 0 };
+        return result;
+    }
+
+    // Skips leading whitespace characters
+    while (file->cur < file->size && (file->buffer[file->cur] == ' ' || file->buffer[file->cur] == '\t'))
+        ++file->cur;
+
+    Str8 line;
+    line.buffer = file->buffer + file->cur;
+    line.len = 0;
+
+    b32 found_comment = false;
+
+    while (file->cur < file->size) {
+        u8 ch = file->buffer[file->cur];
+
+        if (ch == '\r') {
+            if (file->cur + 1 < file->size && file->buffer[file->cur + 1] == '\n')
+                file->cur += 2;
+            else
+                file->cur++;
+
+            break;
+        }
+
+        else if (ch == '\n') {
+            file->cur++;
+            break;
+        }
+
+        else if (ch == '#') found_comment = true;
+        else if (!found_comment) ++line.len;
+
+        file->cur++;
+    }
+
+    // Removes trailing whitespace characters
+    while (line.len > 0 && (line.buffer[line.len - 1] == ' ' || line.buffer[line.len - 1] == '\t'))
+        --line.len;
+
+    return line;
 }
 
 #endif /* CFD_ENSIGHT_GOLD_IMPLEMENTATION */
