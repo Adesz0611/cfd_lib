@@ -34,11 +34,10 @@ typedef enum {
 } Ensight_VariableType;
 
 typedef struct {
-    Ensight_VariableType type;
-    u32 ts, fs;
-    b32 ts_set, fs_set;
-    Str8 description;
     Str8 filename;
+    Str8 description;
+    Ensight_VariableType type;
+    s32 ts, fs; // -1 if not given
 } Ensight_Variable;
 
 typedef struct {
@@ -47,15 +46,13 @@ typedef struct {
 } Ensight_VariableArray;
 
 typedef struct {
-    u32 time_set_number;
     Str8 time_set_description; // Empty string if not specified
+    float *time_values;
 
+    u32 time_set_number;
     u32 number_of_steps;
-
     u32 filename_start_number;
     u32 filename_increment;
-
-    float *time_values;
 } Ensight_Time;
 
 typedef struct {

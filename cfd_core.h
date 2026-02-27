@@ -97,7 +97,7 @@ typedef struct Str8 {
 } Str8;
 
 #define CFD_CHECK_NULL(ptr) \
-    if (!(ptr)) { \
+    if (unlikely(!(ptr))) { \
         cfd_error("%s: parameter '%s' is NULL!", __func__, #ptr); \
         return false; \
     }
@@ -125,7 +125,7 @@ static force_inline void *cfd_arena_alloc_aligned(CFD_Arena *arena, u64 size, u6
     u64 aligned_ptr = (current_ptr + (alignment - 1)) & ~(alignment - 1);
     u64 new_offset = (aligned_ptr - (uintptr_t)arena->buffer) + size;
 
-    if (new_offset <= arena->cap) {
+    if (likely(new_offset <= arena->cap)) {
         arena->offset = new_offset;
         return (void *)aligned_ptr;
     }
@@ -140,7 +140,7 @@ static force_inline void *cfd_arena_alloc(CFD_Arena *arena, u64 size) {
 
 static force_inline void *cfd_arena_alloc_zero_aligned(CFD_Arena *arena, u64 size, u64 alignment) {
     void *ptr = cfd_arena_alloc_aligned(arena, size, alignment);
-    if (ptr) memset(ptr, 0, size);
+    if (likely(ptr)) memset(ptr, 0, size);
     return ptr;
 }
 
@@ -179,13 +179,57 @@ CFD_LIB Str8 cfd_file_readline(CFD_File *file);
 static force_inline Str8 Str8_From_Zstr(u8 *txt, u64 len) { Str8 res = { (u8*)txt, len }; return res; }
 #define str8_lit(s) Str8_From_Zstr((u8 *)s, sizeof(s) - 1)
 
-CFD_LIB Str8 str8_copy(CFD_Arena *arena, Str8 s);
-CFD_LIB b32 str8_equals(Str8 lhs, Str8 rhs);
-CFD_LIB b32 str8_ends_with(Str8 s, Str8 suffix);
 CFD_LIB b32 str8_is_all_digits(Str8 s);
-CFD_LIB Str8 str8_ltrim(Str8 s);
-CFD_LIB Str8 str8_rtrim(Str8 s);
 CFD_LIB s32 str8_to_s32(Str8 s);
+
+static force_inline Str8 str8_copy(CFD_Arena *arena, Str8 s) {
+    Str8 result;
+
+    result.len = s.len;
+    result.buffer = (u8 *)cfd_arena_alloc_aligned(arena, s.len, 1);
+
+    memcpy(result.buffer, s.buffer, s.len);
+
+    return result;
+}
+
+
+static force_inline b32 str8_equals(Str8 lhs, Str8 rhs) {
+    if (lhs.len != rhs.len) return false;
+
+    for (u64 i = 0; i < lhs.len; ++i)
+        if (lhs.buffer[i] != rhs.buffer[i])
+            return false;
+
+    return true;
+}
+
+static force_inline b32 str8_ends_with(Str8 s, Str8 suffix) {
+    if (unlikely(s.len < suffix.len)) return false;
+    Str8 end = { s.buffer + s.len - suffix.len, suffix.len };
+    return str8_equals(end, suffix);
+}
+
+
+static force_inline Str8 str8_ltrim(Str8 s) {
+    Str8 result = s;
+
+    while (result.len > 0 && (result.buffer[0] == ' ' || result.buffer[0] == '\t')) {
+        ++result.buffer;
+        --result.len;
+    }
+
+    return result;
+}
+
+static force_inline Str8 str8_rtrim(Str8 s) {
+    Str8 result = s;
+
+    while (result.len > 0 && (result.buffer[result.len - 1] == ' ' || result.buffer[result.len - 1] == '\t'))
+        --result.len;
+
+    return result;
+}
 
 #ifdef CFD_LIB_IMPLEMENTATION
 
@@ -368,13 +412,13 @@ CFD_LIB void cfd_dirname(const char *path, char *dest) {
     }
 
     u64 path_len = strlen(path);
-    if (path_len == 0) {
+    if (unlikely(path_len == 0)) {
         dest[0] = '.';
         dest[1] = '\0';
         return;
     }
 
-    if (path_len > PATH_MAX) {
+    if (unlikely(path_len > PATH_MAX)) {
         cfd_error("The length of path(%zu) is longer than OS PATH_MAX(%zu)!", path_len, PATH_MAX);
         return;
     }
@@ -437,35 +481,8 @@ CFD_LIB Str8 cfd_file_readline(CFD_File *file) {
     return line;
 }
 
-CFD_LIB Str8 str8_copy(CFD_Arena *arena, Str8 s) {
-    Str8 result;
-
-    result.len = s.len;
-    result.buffer = (u8 *)cfd_arena_alloc_aligned(arena, s.len, 1);
-
-    memcpy(result.buffer, s.buffer, s.len);
-
-    return result;
-}
-
-CFD_LIB b32 str8_equals(Str8 lhs, Str8 rhs) {
-    if (lhs.len != rhs.len) return false;
-
-    for (u64 i = 0; i < lhs.len; ++i)
-        if (lhs.buffer[i] != rhs.buffer[i])
-            return false;
-
-    return true;
-}
-
-CFD_LIB b32 str8_ends_with(Str8 s, Str8 suffix) {
-    if (s.len < suffix.len) return false;
-    Str8 end = { s.buffer + s.len - suffix.len, suffix.len };
-    return str8_equals(end, suffix);
-}
-
 CFD_LIB b32 str8_is_all_digits(Str8 s) {
-    if (s.len == 0) return false;
+    if (unlikely(s.len == 0)) return false;
 
     for (u64 i = 0; i < s.len; ++i)
         if (s.buffer[i] < '0' || s.buffer[i] > '9')
@@ -474,30 +491,11 @@ CFD_LIB b32 str8_is_all_digits(Str8 s) {
     return true;
 }
 
-CFD_LIB Str8 str8_ltrim(Str8 s) {
-    Str8 result = s;
-
-    while (result.len > 0 && (result.buffer[0] == ' ' || result.buffer[0] == '\t')) {
-        ++result.buffer;
-        --result.len;
-    }
-
-    return result;
-}
-
-CFD_LIB Str8 str8_rtrim(Str8 s) {
-    Str8 result = s;
-
-    while (result.len > 0 && (result.buffer[result.len - 1] == ' ' || result.buffer[result.len - 1] == '\t'))
-        --result.len;
-
-    return result;
-}
 
 CFD_LIB s32 str8_to_s32(Str8 s) {
     s32 n = 0, sign = 1;
 
-    if (s.len > 0) {
+    if (likely(s.len > 0)) {
         switch (s.buffer[0]) {
             case '-':
                 sign = -1;
