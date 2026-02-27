@@ -46,10 +46,10 @@ typedef struct {
 } Ensight_VariableArray;
 
 typedef struct {
-    Str8 time_set_description; // Empty string if not specified
+    Str8 description; // Empty string if not specified
     float *time_values;
 
-    u32 time_set_number;
+    s32 ts;
     u32 number_of_steps;
     u32 filename_start_number;
     u32 filename_increment;
@@ -101,11 +101,14 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
     if (sizes.time_count > 0) {
         encase->time = cfd_arena_push_type_zero(arena, Ensight_TimeArray);
         encase->time->elems = cfd_arena_push_array(arena, Ensight_Time, sizes.time_count);
+        encase->time->len = sizes.time_count;
     }
 
 
     cfd_dirname(case_filename, encase->dirname);
     cfd_info("Dirname: %s", encase->dirname);
+
+    s32 time_set_idx = -1;
 
     Ensight_SectionType type = ENSIGHT_NOSECTION;
 
@@ -173,7 +176,7 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
 
                 Str8 filename = str8_ltrim(value);
 
-                cfd_info("file='%.*s', ts=%d, fs=%d, coords_only=%d", str8_arg(filename), ts, fs, change_coords_only);
+                // cfd_info("file='%.*s', ts=%d, fs=%d, coords_only=%d", str8_arg(filename), ts, fs, change_coords_only);
 
                 cursor_key = key;
                 word = ensight_consume_word(&cursor_key);
@@ -263,7 +266,7 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
 
                 Str8 filename = str8_ltrim(value);
 
-                cfd_info("Variable: ts=%d fs=%d description='%.*s' filename='%.*s'", ts, fs, str8_arg(description), str8_arg(filename));
+                // cfd_info("Variable: ts=%d fs=%d description='%.*s' filename='%.*s'", ts, fs, str8_arg(description), str8_arg(filename));
 
                 Ensight_Variable *variable = &encase->variable->elems[encase->variable->len++];
 
@@ -326,8 +329,128 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
                 }
                 break;
                 }
-            case ENSIGHT_TIME:
+            case ENSIGHT_TIME: {
+                cursor_key = key;
+                word = ensight_consume_word(&cursor_key);
+
+                Ensight_Time *time = &encase->time->elems[time_set_idx];
+
+                if (str8_equals(word, str8_lit("time"))) {
+                    word = ensight_consume_word(&cursor_key);
+
+                    if (str8_equals(word, str8_lit("set"))) {
+                        Str8 value_cursor = value;
+                        word = ensight_consume_word(&value_cursor);
+
+                        if (unlikely(!str8_is_all_digits(word))) {
+                            cfd_error("value of 'time set' must be numeric!");
+                            return false;
+                        }
+
+                        time = &encase->time->elems[++time_set_idx];
+                        time->ts = str8_to_s32(word);
+                        time->description = str8_copy(arena, str8_ltrim(value_cursor));
+
+                    } else if (str8_equals(word, str8_lit("values"))) {
+                        if (unlikely(time_set_idx == -1)) {
+                            cfd_error("TIME section protocol error: 'time set' must be defined before all other parameters (found '%.*s')!", str8_arg(key));
+                            return false;
+                        }
+
+                        word = ensight_consume_word(&cursor_key);
+                        if (str8_equals(word, str8_lit("file"))) {
+                            cfd_error("'time values file' option in TIME section is not implemented yet!");
+                            return false;
+                        }
+
+                        time->time_values = cfd_arena_push_array(arena, float, time->number_of_steps);
+                        u32 time_idx = 0;
+
+                        // TODO: check every value to see if it really is a float
+                        while (true) {
+                            word = ensight_consume_word(&value);
+                            if (word.len == 0) break;
+                            time->time_values[time_idx++] = str8_to_f32(word);
+                        }
+
+                        if (time->number_of_steps != time_idx) {
+                            while (!IS_CFD_FILE_EOF(f) && time->number_of_steps != time_idx) {
+                                line = cfd_file_ensight_readline(f);
+                                if (line.len == 0) continue;
+
+                                while (true) {
+                                    word = ensight_consume_word(&line);
+                                    if (word.len == 0) break;
+                                    time->time_values[time_idx++] = str8_to_f32(word);
+                                }
+
+                            }
+                        }
+
+                    } else {
+                        cfd_error("invalid key in TIME section '%.*s'!", str8_arg(key));
+                        return false;
+                    }
+                } else if (str8_equals(word, str8_lit("number"))) {
+                    if (unlikely(time_set_idx == -1)) {
+                        cfd_error("TIME section protocol error: 'time set' must be defined before all other parameters (found '%.*s')!", str8_arg(key));
+                        return false;
+                    }
+
+                    word = ensight_consume_word(&cursor_key);
+                    Str8 steps_str = ensight_consume_word(&cursor_key);
+                    if (unlikely(!str8_equals(word, str8_lit("of")) ||
+                                  !str8_equals(steps_str, str8_lit("steps")))) {
+                        cfd_error("invalid key in TIME section '%.*s' did you mean 'number of steps'?", str8_arg(key));
+                        return false;
+                    }
+
+                    word = ensight_consume_word(&value);
+                    if (unlikely(!str8_is_all_digits(word))) {
+                        cfd_error("value of 'number of steps' must be numeric!");
+                        return false;
+                    }
+
+                    time->number_of_steps = str8_to_u32(word);
+                } else if (str8_equals(word, str8_lit("filename"))) {
+                    if (unlikely(time_set_idx == -1)) {
+                        cfd_error("TIME section protocol error: 'time set' must be defined before all other parameters (found '%.*s')!", str8_arg(key));
+                        return false;
+                    }
+
+                    word = ensight_consume_word(&cursor_key);
+                    if (str8_equals(word, str8_lit("start"))) {
+                        word = ensight_consume_word(&cursor_key);
+                        if (unlikely(!str8_equals(word, str8_lit("number")))) {
+                            cfd_error("invalid key in TIME section '%.*s'!", str8_arg(key));
+                            return false;
+                        }
+
+                        word = ensight_consume_word(&value);
+                        if (unlikely(!str8_is_all_digits(word))) {
+                            cfd_error("value of 'filename start number' must be numeric!");
+                            return false;
+                        }
+
+                        time->filename_start_number = str8_to_u32(word);
+                    } else if (str8_equals(word, str8_lit("increment"))) {
+                        word = ensight_consume_word(&value);
+                        if (unlikely(!str8_is_all_digits(word))) {
+                            cfd_error("value of 'filename increment' must be numeric!");
+                            return false;
+                        }
+
+                        time->filename_increment = str8_to_u32(word);
+                    } else if (str8_equals(word, str8_lit("numbers"))) {
+                        cfd_error("'filename numbers' and 'filename numbers file' options in TIME section are not implemented yet!");
+                        return false;
+                    }
+                } else {
+                    cfd_error("invalid key in TIME section '%.*s'!", str8_arg(key));
+                    return false;
+                }
                 break;
+                }
             case ENSIGHT_FILE:
                 break;
             case ENSIGHT_MATERIAL:

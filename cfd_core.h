@@ -38,6 +38,9 @@ typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
+typedef float f32;
+typedef double f64;
+
 typedef u32 b32;
 
 #ifndef __cplusplus
@@ -181,6 +184,7 @@ static force_inline Str8 Str8_From_Zstr(u8 *txt, u64 len) { Str8 res = { (u8*)tx
 
 CFD_LIB b32 str8_is_all_digits(Str8 s);
 CFD_LIB s32 str8_to_s32(Str8 s);
+CFD_LIB f32 str8_to_f32(Str8 s);
 
 static force_inline Str8 str8_copy(CFD_Arena *arena, Str8 s) {
     Str8 result;
@@ -229,6 +233,15 @@ static force_inline Str8 str8_rtrim(Str8 s) {
         --result.len;
 
     return result;
+}
+
+static force_inline u32 str8_to_u32(Str8 s) {
+    u32 n = 0;
+
+    while (s.len-- && *s.buffer >= '0' && *s.buffer <= '9')
+        n = n * 10 + *s.buffer++ - '0';
+
+    return n;
 }
 
 #ifdef CFD_LIB_IMPLEMENTATION
@@ -513,6 +526,73 @@ CFD_LIB s32 str8_to_s32(Str8 s) {
         n = n * 10 + *s.buffer++ - '0';
 
     return n * sign;
+}
+
+CFD_LIB f32 str8_to_f32(Str8 s) {
+    if (!s.buffer || s.len == 0)
+        return 0.0f;
+
+    f32 result = 0.0f;
+    f32 fraction = 0.0f;
+    s32 exponent = 0;
+    f32 sign = 1.0;
+    f32 frac_divisor = 1.0f;
+    u64 i = 0;
+
+    if (i < s.len && (s.buffer[i] == '-' || s.buffer[i] == '+')) {
+        if (s.buffer[i] == '-') {
+            sign = -1.0f;
+        }
+        i++;
+    }
+
+    while (i < s.len && s.buffer[i] >= '0' && s.buffer[i] <= '9') {
+        result = result * 10.0f + (s.buffer[i] - '0');
+        i++;
+    }
+
+    if (i < s.len && s.buffer[i] == '.') {
+        i++;
+        while (i < s.len && s.buffer[i] >= '0' && s.buffer[i] <= '9') {
+            fraction = fraction * 10.0f + (s.buffer[i] - '0');
+            frac_divisor *= 10.0f;
+            i++;
+        }
+    }
+
+    result += fraction / frac_divisor;
+
+    if (i < s.len && (s.buffer[i] == 'e' || s.buffer[i] == 'E')) {
+        i++;
+        s32 exp_sign = 1;
+        s32 exp_value = 0;
+
+        if (i < s.len && (s.buffer[i] == '-' || s.buffer[i] == '+')) {
+            if (s.buffer[i] == '-') {
+                exp_sign = -1;
+            }
+            i++;
+        }
+
+        while (i < s.len && s.buffer[i] >= '0' && s.buffer[i] <= '9') {
+            exp_value = exp_value * 10 + (s.buffer[i] - '0');
+            i++;
+        }
+
+        exponent = exp_sign * exp_value;
+    }
+
+    if (exponent > 0) {
+        while (exponent--) {
+            result *= 10.0f;
+        }
+    } else if (exponent < 0) {
+        while (exponent++) {
+            result /= 10.0f;
+        }
+    }
+
+    return sign * result;
 }
 
 #endif /* CFD_LIB_IMPLEMENTATION */
