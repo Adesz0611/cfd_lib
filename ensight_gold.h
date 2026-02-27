@@ -63,9 +63,14 @@ typedef struct {
 typedef struct {
     Ensight_Geometry *geometry;
     Ensight_VariableArray *variable;
-    Ensight_TimeArray *times;
+    Ensight_TimeArray *time;
     char dirname[PATH_MAX];
 } Ensight_Case;
+
+typedef struct {
+    u32 var_count;
+    u32 time_count;
+} Ensight_Case_Sizes;
 
 CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const char *case_filename, CFD_File *file);
 
@@ -73,6 +78,7 @@ CFD_INTERNAL Ensight_SectionType ensight_get_section_type(Str8 s);
 CFD_INTERNAL Str8 cfd_file_ensight_readline(CFD_File *file);
 CFD_INTERNAL void ensight_split_key_value(Str8 str, Str8 *key, Str8 *value);
 CFD_INTERNAL Str8 ensight_consume_word(Str8 *src);
+CFD_INTERNAL Ensight_Case_Sizes ensight_get_case_sizes(CFD_File file);
 
 #ifdef CFD_ENSIGHT_GOLD_IMPLEMENTATION
 
@@ -85,7 +91,18 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
 
     encase->geometry = NULL;
     encase->variable = NULL;
-    encase->times = NULL;
+    encase->time = NULL;
+
+    Ensight_Case_Sizes sizes = ensight_get_case_sizes(*f);
+    if (sizes.var_count > 0) {
+        encase->variable = cfd_arena_push_type_zero(arena, Ensight_VariableArray);
+        encase->variable->elems = cfd_arena_push_array(arena, Ensight_Variable, sizes.var_count);
+    }
+    if (sizes.time_count > 0) {
+        encase->time = cfd_arena_push_type_zero(arena, Ensight_TimeArray);
+        encase->time->elems = cfd_arena_push_array(arena, Ensight_Time, sizes.time_count);
+    }
+
 
     cfd_dirname(case_filename, encase->dirname);
     cfd_info("Dirname: %s", encase->dirname);
@@ -106,7 +123,7 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
         Str8 key, value;
         ensight_split_key_value(line, &key, &value);
 
-        Str8 word;
+        Str8 word, cursor_key;
 
         switch (type) {
             case ENSIGHT_FORMAT:
@@ -158,7 +175,8 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
 
                 cfd_info("file='%.*s', ts=%d, fs=%d, coords_only=%d", str8_arg(filename), ts, fs, change_coords_only);
 
-                word = ensight_consume_word(&key);
+                cursor_key = key;
+                word = ensight_consume_word(&cursor_key);
 
                 if (encase->geometry == NULL)
                     encase->geometry = cfd_arena_push_type_zero(arena, Ensight_Geometry);
@@ -213,14 +231,101 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
 
                     boundary->filename = str8_copy(arena, filename);
                 } else {
-                    cfd_error("invalid key in GEOMETRY section '%.*s' instead of 'model' | 'measured' | 'match' | 'boundary'!", str8_arg(word));
+                    cfd_error("invalid key in GEOMETRY section '%.*s' instead of 'model' | 'measured' | 'match' | 'boundary'!", str8_arg(key));
                     return false;
                 }
 
                 break;
                 }
-            case ENSIGHT_VARIABLE:
+            case ENSIGHT_VARIABLE: {
+                cursor_key = key;
+                word = ensight_consume_word(&cursor_key);
+
+                s32 ts = -1, fs = -1;
+                Str8 value_cursor = value;
+                Str8 first = ensight_consume_word(&value_cursor);
+                if (str8_is_all_digits(first) && value_cursor.len > 0) {
+                    ts = str8_to_s32(first);
+                    value = value_cursor;
+
+                    Str8 second = ensight_consume_word(&value_cursor);
+                    if (str8_is_all_digits(second) && value_cursor.len > 0) {
+                        fs = str8_to_s32(second);
+                        value = value_cursor;
+                    }
+                }
+
+                Str8 description = ensight_consume_word(&value);
+                if (unlikely(description.len == 0)) {
+                    cfd_error("no description found for variable in case file!");
+                    return false;
+                }
+
+                Str8 filename = str8_ltrim(value);
+
+                cfd_info("Variable: ts=%d fs=%d description='%.*s' filename='%.*s'", ts, fs, str8_arg(description), str8_arg(filename));
+
+                Ensight_Variable *variable = &encase->variable->elems[encase->variable->len++];
+
+                variable->ts = ts;
+                variable->description = str8_copy(arena, description);
+
+                if (str8_equals(word, str8_lit("scalar"))) {
+                    variable->fs = fs;
+                    variable->filename = str8_copy(arena, filename);
+
+                    word = ensight_consume_word(&cursor_key);
+                    if (unlikely(!str8_equals(word, str8_lit("per")))) {
+                        cfd_error("expected 'per' keyword, got '%.*s' in case file!", str8_arg(word));
+                        return false;;
+                    }
+
+                    word = ensight_consume_word(&cursor_key);
+                    if (str8_equals(word, str8_lit("node"))) {
+                        variable->type = ENSIGHT_VARIABLE_SCALAR_PER_NODE;
+                    } else if (str8_equals(word, str8_lit("element"))) {
+                        variable->type = ENSIGHT_VARIABLE_SCALAR_PER_ELEMENT;
+                    } else {
+                        cfd_error("invalid key '%.*s' in case file!", str8_arg(key));
+                        return false;
+                    }
+                }
+                else if (str8_equals(word, str8_lit("vector"))) {
+
+                    variable->fs = fs;
+                    variable->filename = str8_copy(arena, filename);
+
+                    word = ensight_consume_word(&cursor_key);
+                    if (unlikely(!str8_equals(word, str8_lit("per")))) {
+                        cfd_error("expected 'per' keyword, got '%.*s' in case file!", str8_arg(word));
+                        return false;
+                    }
+
+                    word = ensight_consume_word(&cursor_key);
+                    if (str8_equals(word, str8_lit("node"))) {
+                        variable->type = ENSIGHT_VARIABLE_VECTOR_PER_NODE;
+                    } else if (str8_equals(word, str8_lit("element"))) {
+                        variable->type = ENSIGHT_VARIABLE_VECTOR_PER_ELEMENT;
+                    } else {
+                        cfd_error("invalid key '%.*s' in case file!", str8_arg(key));
+                        return false;
+                    }
+                }
+                else if (str8_equals(word, str8_lit("constant"))) {
+                    cfd_warn("'constant per case' and 'constant per case file' are not implemented yet!");
+                }
+                else if (str8_equals(word, str8_lit("tensor"))) {
+                    cfd_error("'tensor symm/asymm per node/element' are not implemented yet!");
+                    return false;
+                }
+                else if (str8_equals(word, str8_lit("complex"))) {
+                    cfd_error("'complex scalar/vector per node/element' are not implemented yet!");
+                    return false;
+                } else {
+                    cfd_error("invalid key in VARIABLE section '%.*s'!", str8_arg(key));
+                }
                 break;
+                }
             case ENSIGHT_TIME:
                 break;
             case ENSIGHT_FILE:
@@ -373,6 +478,38 @@ CFD_INTERNAL Str8 ensight_consume_word(Str8 *src) {
     src->len -= end;
 
     return token;
+}
+
+CFD_INTERNAL Ensight_Case_Sizes ensight_get_case_sizes(CFD_File file) {
+    CFD_File *f = &file;
+
+    Ensight_Case_Sizes sizes = { 0 };
+
+    while(!IS_CFD_FILE_EOF(f)) {
+        Str8 line = cfd_file_ensight_readline(f);
+        if (line.len == 0) continue;
+
+        Str8 word = ensight_consume_word(&line);
+        if (str8_equals(word, str8_lit("scalar"))
+            || str8_equals(word, str8_lit("vector"))
+          //|| str8_equals(word, str8_lit("constant"))
+          //|| str8_equals(word, str8_lit("tensor"))
+          //|| str8_equals(word, str8_lit("complex"))
+            ) {
+            ++sizes.var_count;
+        } else if (str8_equals(word, str8_lit("time"))) {
+            Str8 key, value;
+            ensight_split_key_value(line, &key, &value);
+
+            word = ensight_consume_word(&key);
+            if (str8_equals(word, str8_lit("set")))
+                ++sizes.time_count;
+        }
+    }
+
+    cfd_info("var_count = %d", sizes.var_count);
+    cfd_info("time_count = %d", sizes.time_count);
+    return sizes;
 }
 
 #endif /* CFD_ENSIGHT_GOLD_IMPLEMENTATION */
