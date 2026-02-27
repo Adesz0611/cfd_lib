@@ -606,7 +606,7 @@ CFD_INTERNAL Str8 ensight_consume_word(Str8 *src) {
 CFD_INTERNAL Ensight_Case_Sizes ensight_get_case_sizes(CFD_File file) {
     CFD_File *f = &file;
 
-    Ensight_Case_Sizes sizes = { 0 };
+    Ensight_Case_Sizes sizes = { 0, 0 };
 
     while(!IS_CFD_FILE_EOF(f)) {
         Str8 line = cfd_file_ensight_readline(f);

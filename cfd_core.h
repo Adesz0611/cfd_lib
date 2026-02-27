@@ -74,6 +74,14 @@ typedef u32 b32;
     #define unlikely(x) (x)
 #endif
 
+#ifdef __cplusplus
+    #include <cstddef>
+    #define align_of(T) alignof(T)
+#else
+    #include <stdalign.h>
+    #define align_of(T) _Alignof(T)
+#endif
+
 
 typedef enum {
     CFD_LOG_LEVEL_INFO,
@@ -152,16 +160,16 @@ static force_inline void *cfd_arena_alloc_zero(CFD_Arena *arena, u64 size) {
 }
 
 #define cfd_arena_push_type(arena, type) \
-    (type *)cfd_arena_alloc_aligned((arena), sizeof(type), _Alignof(type))
+    (type *)cfd_arena_alloc_aligned((arena), sizeof(type), align_of(type))
 
 #define cfd_arena_push_type_zero(arena, type) \
-    (type *)cfd_arena_alloc_zero_aligned((arena), sizeof(type), _Alignof(type))
+    (type *)cfd_arena_alloc_zero_aligned((arena), sizeof(type), align_of(type))
 
 #define cfd_arena_push_array(arena, type, count) \
-    (type *)cfd_arena_alloc_aligned((arena), sizeof(type) * (count), _Alignof(type))
+    (type *)cfd_arena_alloc_aligned((arena), sizeof(type) * (count), align_of(type))
 
 #define cfd_arena_push_array_zero(arena, type, count) \
-    (type *)cfd_arena_alloc_zero_aligned((arena), sizeof(type) * (count), _Alignof(type))
+    (type *)cfd_arena_alloc_zero_aligned((arena), sizeof(type) * (count), align_of(type))
 
 
 // FILE HANDLING
