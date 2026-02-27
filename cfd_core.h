@@ -63,6 +63,14 @@ typedef u32 b32;
 #define force_inline inline __attribute__((always_inline))
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+    #define likely(x)   __builtin_expect(!!(x), 1)
+    #define unlikely(x) __builtin_expect(!!(x), 0)
+#else
+    #define likely(x)   (x)
+    #define unlikely(x) (x)
+#endif
+
 
 typedef enum {
     CFD_LOG_LEVEL_INFO,
@@ -143,6 +151,9 @@ static force_inline void *cfd_arena_alloc_zero(CFD_Arena *arena, u64 size) {
 #define cfd_arena_push_type(arena, type) \
     (type *)cfd_arena_alloc_aligned((arena), sizeof(type), _Alignof(type))
 
+#define cfd_arena_push_type_zero(arena, type) \
+    (type *)cfd_arena_alloc_zero_aligned((arena), sizeof(type), _Alignof(type))
+
 #define cfd_arena_push_array(arena, type, count) \
     (type *)cfd_arena_alloc_aligned((arena), sizeof(type) * (count), _Alignof(type))
 
@@ -163,10 +174,18 @@ CFD_LIB Str8 cfd_file_readline(CFD_File *file);
 // STRING HANDLING
 
 #define Str8_Fmt "%.*s"
-#define Str8_Arg(s) (int)(s).len, (s).buffer
+#define str8_arg(s) (int)(s).len, (s).buffer
 
 static force_inline Str8 Str8_From_Zstr(u8 *txt, u64 len) { Str8 res = { (u8*)txt, len }; return res; }
-#define Str8_Lit(s) Str8_From_Zstr((u8 *)s, sizeof(s) - 1)
+#define str8_lit(s) Str8_From_Zstr((u8 *)s, sizeof(s) - 1)
+
+CFD_LIB Str8 str8_copy(CFD_Arena *arena, Str8 s);
+CFD_LIB b32 str8_equals(Str8 lhs, Str8 rhs);
+CFD_LIB b32 str8_ends_with(Str8 s, Str8 suffix);
+CFD_LIB b32 str8_is_all_digits(Str8 s);
+CFD_LIB Str8 str8_ltrim(Str8 s);
+CFD_LIB Str8 str8_rtrim(Str8 s);
+CFD_LIB s32 str8_to_s32(Str8 s);
 
 #ifdef CFD_LIB_IMPLEMENTATION
 
@@ -282,7 +301,7 @@ CFD_LIB b32 cfd_file_slurp(char *filename, CFD_File *file) {
         return false;
     }
 
-    file->size = sb.st_size;
+    file->size = (u64)sb.st_size;
 
     file->buffer = (u8 *)mmap(NULL, file->size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (file->buffer == MAP_FAILED) {
@@ -373,7 +392,7 @@ CFD_LIB void cfd_dirname(const char *path, char *dest) {
     }
 
     if (last_slash_index > 0) {
-        memcpy(dest, path, last_slash_index);
+        memcpy(dest, path, (size_t)last_slash_index);
         dest[last_slash_index] = '\0';
     } else if (last_slash_index == 0) {
         dest[0] = path[0];
@@ -416,6 +435,86 @@ CFD_LIB Str8 cfd_file_readline(CFD_File *file) {
     }
 
     return line;
+}
+
+CFD_LIB Str8 str8_copy(CFD_Arena *arena, Str8 s) {
+    Str8 result;
+
+    result.len = s.len;
+    result.buffer = (u8 *)cfd_arena_alloc_aligned(arena, s.len, 1);
+
+    memcpy(result.buffer, s.buffer, s.len);
+
+    return result;
+}
+
+CFD_LIB b32 str8_equals(Str8 lhs, Str8 rhs) {
+    if (lhs.len != rhs.len) return false;
+
+    for (u64 i = 0; i < lhs.len; ++i)
+        if (lhs.buffer[i] != rhs.buffer[i])
+            return false;
+
+    return true;
+}
+
+CFD_LIB b32 str8_ends_with(Str8 s, Str8 suffix) {
+    if (s.len < suffix.len) return false;
+    Str8 end = { s.buffer + s.len - suffix.len, suffix.len };
+    return str8_equals(end, suffix);
+}
+
+CFD_LIB b32 str8_is_all_digits(Str8 s) {
+    if (s.len == 0) return false;
+
+    for (u64 i = 0; i < s.len; ++i)
+        if (s.buffer[i] < '0' || s.buffer[i] > '9')
+            return false;
+
+    return true;
+}
+
+CFD_LIB Str8 str8_ltrim(Str8 s) {
+    Str8 result = s;
+
+    while (result.len > 0 && (result.buffer[0] == ' ' || result.buffer[0] == '\t')) {
+        ++result.buffer;
+        --result.len;
+    }
+
+    return result;
+}
+
+CFD_LIB Str8 str8_rtrim(Str8 s) {
+    Str8 result = s;
+
+    while (result.len > 0 && (result.buffer[result.len - 1] == ' ' || result.buffer[result.len - 1] == '\t'))
+        --result.len;
+
+    return result;
+}
+
+CFD_LIB s32 str8_to_s32(Str8 s) {
+    s32 n = 0, sign = 1;
+
+    if (s.len > 0) {
+        switch (s.buffer[0]) {
+            case '-':
+                sign = -1;
+                --s.len;
+                ++s.buffer;
+                break;
+            case '+':
+                --s.len;
+                ++s.buffer;
+                break;
+        }
+    }
+
+    while (s.len-- && *s.buffer >= '0' && *s.buffer <= '9')
+        n = n * 10 + *s.buffer++ - '0';
+
+    return n * sign;
 }
 
 #endif /* CFD_LIB_IMPLEMENTATION */
