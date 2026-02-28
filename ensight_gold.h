@@ -80,14 +80,14 @@ CFD_INTERNAL void ensight_split_key_value(Str8 str, Str8 *key, Str8 *value);
 CFD_INTERNAL Str8 ensight_consume_word(Str8 *src);
 CFD_INTERNAL Ensight_Case_Sizes ensight_get_case_sizes(CFD_File file);
 
-#ifdef CFD_ENSIGHT_GOLD_IMPLEMENTATION
+#ifdef CFD_LIB_IMPLEMENTATION
 
 CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const char *case_filename, CFD_File *f) {
-    cfd_info("case file size: %zu bytes", f->size);
     CFD_CHECK_NULL(arena);
     CFD_CHECK_NULL(encase);
     CFD_CHECK_NULL(case_filename);
     CFD_CHECK_NULL(f);
+    cfd_info("case file size: %zu bytes", f->size);
 
     encase->geometry = NULL;
     encase->variable = NULL;
@@ -221,7 +221,10 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
                     Ensight_GeometryElem *match;
                     match = encase->geometry->match;
 
+                    match->ts = ts;
+                    match->fs = fs;
                     match->filename = str8_copy(arena, filename);
+                    match->change_coords_only = change_coords_only;
                 }
                 else if (str8_equals(word, str8_lit("boundary"))) {
                     if (likely(encase->geometry->boundary == NULL))
@@ -232,7 +235,10 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
                     Ensight_GeometryElem *boundary;
                     boundary = encase->geometry->boundary;
 
+                    boundary->ts = ts;
+                    boundary->fs = fs;
                     boundary->filename = str8_copy(arena, filename);
+                    boundary->change_coords_only = change_coords_only;
                 } else {
                     cfd_error("invalid key in GEOMETRY section '%.*s' instead of 'model' | 'measured' | 'match' | 'boundary'!", str8_arg(key));
                     return false;
@@ -268,19 +274,22 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
 
                 // cfd_info("Variable: ts=%d fs=%d description='%.*s' filename='%.*s'", ts, fs, str8_arg(description), str8_arg(filename));
 
-                Ensight_Variable *variable = &encase->variable->elems[encase->variable->len++];
-
-                variable->ts = ts;
-                variable->description = str8_copy(arena, description);
-
                 if (str8_equals(word, str8_lit("scalar"))) {
+                    if (unlikely(encase->variable == NULL)) {
+                        cfd_error("VARIABLE section error: no variable storage allocated!");
+                        return false;
+                    }
+
+                    Ensight_Variable *variable = &encase->variable->elems[encase->variable->len++];
+                    variable->ts = ts;
                     variable->fs = fs;
+                    variable->description = str8_copy(arena, description);
                     variable->filename = str8_copy(arena, filename);
 
                     word = ensight_consume_word(&cursor_key);
                     if (unlikely(!str8_equals(word, str8_lit("per")))) {
                         cfd_error("expected 'per' keyword, got '%.*s' in case file!", str8_arg(word));
-                        return false;;
+                        return false;
                     }
 
                     word = ensight_consume_word(&cursor_key);
@@ -294,8 +303,15 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
                     }
                 }
                 else if (str8_equals(word, str8_lit("vector"))) {
+                    if (unlikely(encase->variable == NULL)) {
+                        cfd_error("VARIABLE section error: no variable storage allocated!");
+                        return false;
+                    }
 
+                    Ensight_Variable *variable = &encase->variable->elems[encase->variable->len++];
+                    variable->ts = ts;
                     variable->fs = fs;
+                    variable->description = str8_copy(arena, description);
                     variable->filename = str8_copy(arena, filename);
 
                     word = ensight_consume_word(&cursor_key);
@@ -330,10 +346,17 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
                 break;
                 }
             case ENSIGHT_TIME: {
+                if (unlikely(encase->time == NULL)) {
+                    cfd_error("TIME section found but no 'time set' was counted during pre-scan!");
+                    return false;
+                }
+
                 cursor_key = key;
                 word = ensight_consume_word(&cursor_key);
 
-                Ensight_Time *time = &encase->time->elems[time_set_idx];
+                Ensight_Time *time = NULL;
+                if (time_set_idx >= 0)
+                    time = &encase->time->elems[time_set_idx];
 
                 if (str8_equals(word, str8_lit("time"))) {
                     word = ensight_consume_word(&cursor_key);
@@ -367,7 +390,7 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
                         u32 time_idx = 0;
 
                         // TODO: check every value to see if it really is a float
-                        while (true) {
+                        while (time_idx < time->number_of_steps) {
                             word = ensight_consume_word(&value);
                             if (word.len == 0) break;
                             time->time_values[time_idx++] = str8_to_f32(word);
@@ -378,7 +401,7 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
                                 line = cfd_file_ensight_readline(f);
                                 if (line.len == 0) continue;
 
-                                while (true) {
+                                while (time_idx < time->number_of_steps) {
                                     word = ensight_consume_word(&line);
                                     if (word.len == 0) break;
                                     time->time_values[time_idx++] = str8_to_f32(word);
@@ -443,6 +466,9 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
                         time->filename_increment = str8_to_u32(word);
                     } else if (str8_equals(word, str8_lit("numbers"))) {
                         cfd_error("'filename numbers' and 'filename numbers file' options in TIME section are not implemented yet!");
+                        return false;
+                    } else {
+                        cfd_error("invalid key in TIME section '%.*s'!", str8_arg(key));
                         return false;
                     }
                 } else {
@@ -635,5 +661,5 @@ CFD_INTERNAL Ensight_Case_Sizes ensight_get_case_sizes(CFD_File file) {
     return sizes;
 }
 
-#endif /* CFD_ENSIGHT_GOLD_IMPLEMENTATION */
+#endif /* CFD_LIB_IMPLEMENTATION */
 #endif /* CFD_ENSIGHT_GOLD_H */

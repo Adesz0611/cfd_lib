@@ -537,14 +537,16 @@ CFD_LIB s32 str8_to_s32(Str8 s) {
 }
 
 CFD_LIB f32 str8_to_f32(Str8 s) {
+    static const f64 pow10_table[] = {
+        1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,
+        1e8,  1e9,  1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+        1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+    };
+
     if (!s.buffer || s.len == 0)
         return 0.0f;
 
-    f32 result = 0.0f;
-    f32 fraction = 0.0f;
-    s32 exponent = 0;
-    f32 sign = 1.0;
-    f32 frac_divisor = 1.0f;
+    f32 sign = 1.0f;
     u64 i = 0;
 
     if (i < s.len && (s.buffer[i] == '-' || s.buffer[i] == '+')) {
@@ -554,21 +556,22 @@ CFD_LIB f32 str8_to_f32(Str8 s) {
         i++;
     }
 
+    f64 result = 0.0;
     while (i < s.len && s.buffer[i] >= '0' && s.buffer[i] <= '9') {
-        result = result * 10.0f + (s.buffer[i] - '0');
+        result = result * 10.0 + (s.buffer[i] - '0');
         i++;
     }
 
     if (i < s.len && s.buffer[i] == '.') {
         i++;
+        f64 frac_divisor = 1.0;
         while (i < s.len && s.buffer[i] >= '0' && s.buffer[i] <= '9') {
-            fraction = fraction * 10.0f + (s.buffer[i] - '0');
-            frac_divisor *= 10.0f;
+            result = result * 10.0 + (s.buffer[i] - '0');
+            frac_divisor *= 10.0;
             i++;
         }
+        result /= frac_divisor;
     }
-
-    result += fraction / frac_divisor;
 
     if (i < s.len && (s.buffer[i] == 'e' || s.buffer[i] == 'E')) {
         i++;
@@ -587,20 +590,24 @@ CFD_LIB f32 str8_to_f32(Str8 s) {
             i++;
         }
 
-        exponent = exp_sign * exp_value;
+        s32 exponent = exp_sign * exp_value;
+
+        if (exponent >= -22 && exponent <= 22) {
+            if (exponent >= 0)
+                result *= pow10_table[exponent];
+            else
+                result /= pow10_table[-exponent];
+        } else {
+            // Fallback for exponents outside table range
+            if (exponent > 0) {
+                while (exponent--) result *= 10.0;
+            } else {
+                while (exponent++) result /= 10.0;
+            }
+        }
     }
 
-    if (exponent > 0) {
-        while (exponent--) {
-            result *= 10.0f;
-        }
-    } else if (exponent < 0) {
-        while (exponent++) {
-            result /= 10.0f;
-        }
-    }
-
-    return sign * result;
+    return sign * (f32)result;
 }
 
 #endif /* CFD_LIB_IMPLEMENTATION */
