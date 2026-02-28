@@ -257,12 +257,16 @@ static force_inline u32 str8_to_u32(Str8 s) {
 #include <stdio.h>
 #include <errno.h>
 
-#ifdef __unix__
-#include <sys/mman.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
+#if defined(__unix__)
+    #include <sys/mman.h>
+    #include <sys/types.h>
+    #include <sys/stat.h>
+    #include <fcntl.h>
+    #include <unistd.h>
+#elif defined(_WIN32)
+    #define WIN32_LEAN_AND_MEAN
+    #define NOMINMAX
+    #include <windows.h>
 #endif
 
 static CFD_Log_Fn g_logger = cfd_default_logger;
@@ -302,14 +306,20 @@ CFD_LIB void cfd_default_logger(CFD_Log_Level level, const char *fmt, va_list ar
 
 
 CFD_LIB b32 cfd_arena_init(CFD_Arena *arena, u64 size) {
-#ifdef __unix__
+#if defined(__unix__)
     arena->buffer = (u8 *)mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (arena->buffer == MAP_FAILED) {
         cfd_error("mmap() failed: could not allocate virtual memory for arena allocator: %s", strerror(errno));
         return false;
     }
+#elif defined(_WIN32)
+    arena->buffer = (u8 *)VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (arena->buffer == NULL) {
+        cfd_error("VirtualAlloc() failed: could not allocate virtual memory. Error code: %lu", GetLastError());
+        return false;
+    }
 #else
-#error "Only UNIX is supported yet"
+#error "Not supported OS"
 #endif
 
     arena->offset = 0;
@@ -333,16 +343,22 @@ CFD_LIB void cfd_arena_reset(CFD_Arena *arena) {
 }
 
 CFD_LIB b32 cfd_arena_destroy(CFD_Arena *arena) {
-#ifdef __unix__
     if (arena->is_mmaped && arena->buffer) {
+#if defined(__unix__)
         if (munmap(arena->buffer, arena->cap) != 0) {
             cfd_error("munmap() failed: could not unmap virtual memory for arena allocator: %s", strerror(errno));
             return false;
         }
-    }
+
+#elif defined(_WIN32)
+        if (VirtualFree(arena->buffer, 0, MEM_RELEASE) == 0) {
+            cfd_error("VirtualFree() failed. Error code: %lu", GetLastError());
+            return false;
+        }
 #else
-#error "Only UNIX is supported yet"
+#error "Not supported OS"
 #endif
+    }
 
     arena->buffer = NULL;
     arena->offset = 0;
@@ -352,7 +368,7 @@ CFD_LIB b32 cfd_arena_destroy(CFD_Arena *arena) {
 }
 
 CFD_LIB b32 cfd_file_slurp(char *filename, CFD_File *file) {
-#ifdef __unix__
+#if defined(__unix__)
     int fd = open(filename, O_RDONLY);
     if (fd == -1) {
         cfd_error("failed to open file '%s' via open(): %s", filename, strerror(errno));
@@ -376,36 +392,48 @@ CFD_LIB b32 cfd_file_slurp(char *filename, CFD_File *file) {
     }
 
     close(fd);
+#elif defined(_WIN32)
+    HANDLE hFile = CreateFileA(filename, GENERIC_READ, FILE_SHARE_READ, NULL,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 
+    if (hFile == INVALID_HANDLE_VALUE) {
+        cfd_error("CreateFileA() failed for '%s'. Error: %lu", filename, GetLastError());
+        return false;
+    }
+
+    LARGE_INTEGER fileSize;
+    if (!GetFileSizeEx(hFile, &fileSize)) {
+        cfd_error("GetFileSizeEx() failed. Error: %lu", GetLastError());
+        CloseHandle(hFile);
+        return false;
+    }
+
+    file->size = (u64)fileSize.QuadPart;
+
+    if (file->size == 0) {
+        cfd_error("File '%s' is empty.", filename);
+        CloseHandle(hFile);
+        return false;
+    }
+
+    HANDLE hMapping = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (hMapping == NULL) {
+        cfd_error("CreateFileMappingA() failed. Error: %lu", GetLastError());
+        CloseHandle(hFile);
+        return false;
+    }
+
+    file->buffer = (u8 *)MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0);
+
+    CloseHandle(hMapping);
+    CloseHandle(hFile);
+
+    if (file->buffer == NULL) {
+        cfd_error("MapViewOfFile() failed. Error: %lu", GetLastError());
+        return false;
+    }
 #else
-
-    FILE *f = fopen(filename, "rb");
-    if (!f) {
-        cfd_error("fopen() failed: %s", strerror(errno));
-        return false;
-    }
-
-    fseek(f, 0, SEEK_END);
-    file->size = ftell(f);
-    rewind(f);
-
-    file->buffer = (u8 *)malloc(file->size);
-    if (!file->buffer) {
-        cfd_error("malloc() failed: %s", strerror(errno));
-        fclose(f);
-        return false;
-    }
-
-    u64 bytes_read = fread(file->buffer, 1, file->size, f);
-    if (bytes_read != file->size) {
-        cfd_error("fread() failed: %s", strerror(errno));
-        free(file->buffer);
-        fclose(f);
-        return false;
-    }
-
-    fclose(f);
-
+#error "Not supported OS"
 #endif /* __unix__ */
 
     file->cur = 0;
@@ -414,13 +442,20 @@ CFD_LIB b32 cfd_file_slurp(char *filename, CFD_File *file) {
 }
 
 CFD_LIB b32 cfd_file_free(CFD_File *file) {
-#ifdef __unix__
+    if (unlikely(file->buffer == NULL)) return true;
+
+#if defined(__unix__)
     if (munmap(file->buffer, file->size) != 0) {
         cfd_error("munmap() failed: could not unmap mapped file: %s", strerror(errno));
         return false;
     }
+#elif defined(_WIN32)
+    if (!UnmapViewOfFile(file->buffer)) {
+        cfd_error("UnmapViewOfFile() failed. Error: %lu", GetLastError());
+        return false;
+    }
 #else
-    free(file->buffer);
+#error "Not supported OS"
 #endif
 
     return true;
