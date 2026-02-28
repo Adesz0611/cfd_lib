@@ -93,6 +93,7 @@ typedef struct CFD_Arena {
     u8 *buffer;
     u64 offset;
     u64 cap;
+    u64 committed;
     b32 is_mmaped;
 } CFD_Arena;
 
@@ -137,6 +138,17 @@ static force_inline void *cfd_arena_alloc_aligned(CFD_Arena *arena, u64 size, u6
     u64 new_offset = (aligned_ptr - (uintptr_t)arena->buffer) + size;
 
     if (likely(new_offset <= arena->cap)) {
+#if defined(_WIN32)
+        if (unlikely(new_offset > arena->committed) && arena->is_mmaped) {
+            u64 commit_end = (new_offset + 0xFFFF) & ~(u64)0xFFFF;
+            if (commit_end > arena->cap) commit_end = arena->cap;
+            if (!VirtualAlloc(arena->buffer + arena->committed, commit_end - arena->committed, MEM_COMMIT, PAGE_READWRITE)) {
+                cfd_error("VirtualAlloc MEM_COMMIT failed. Error: %lu", GetLastError());
+                return NULL;
+            }
+            arena->committed = commit_end;
+        }
+#endif
         arena->offset = new_offset;
         return (void *)aligned_ptr;
     }
@@ -312,12 +324,14 @@ CFD_LIB b32 cfd_arena_init(CFD_Arena *arena, u64 size) {
         cfd_error("mmap() failed: could not allocate virtual memory for arena allocator: %s", strerror(errno));
         return false;
     }
+    arena->committed = size;
 #elif defined(_WIN32)
-    arena->buffer = (u8 *)VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    arena->buffer = (u8 *)VirtualAlloc(NULL, size, MEM_RESERVE, PAGE_READWRITE);
     if (arena->buffer == NULL) {
-        cfd_error("VirtualAlloc() failed: could not allocate virtual memory. Error code: %lu", GetLastError());
+        cfd_error("VirtualAlloc() failed: could not reserve virtual memory. Error code: %lu", GetLastError());
         return false;
     }
+    arena->committed = 0;
 #else
 #error "Not supported OS"
 #endif
@@ -335,6 +349,7 @@ CFD_LIB void cfd_arena_init_from_buffer(CFD_Arena *arena, void *buffer, u64 size
     arena->buffer = (u8 *)buffer;
     arena->offset = 0;
     arena->cap = size;
+    arena->committed = size;
     arena->is_mmaped = false;
 }
 
@@ -363,6 +378,7 @@ CFD_LIB b32 cfd_arena_destroy(CFD_Arena *arena) {
     arena->buffer = NULL;
     arena->offset = 0;
     arena->cap = 0;
+    arena->committed = 0;
     arena->is_mmaped = false;
     return true;
 }
@@ -383,6 +399,12 @@ CFD_LIB b32 cfd_file_slurp(char *filename, CFD_File *file) {
     }
 
     file->size = (u64)sb.st_size;
+
+    if (file->size == 0) {
+        cfd_error("File '%s' is empty.", filename);
+        close(fd);
+        return false;
+    }
 
     file->buffer = (u8 *)mmap(NULL, file->size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (file->buffer == MAP_FAILED) {
@@ -457,6 +479,10 @@ CFD_LIB b32 cfd_file_free(CFD_File *file) {
 #else
 #error "Not supported OS"
 #endif
+
+    file->buffer = NULL;
+    file->size = 0;
+    file->cur = 0;
 
     return true;
 }
