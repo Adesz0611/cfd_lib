@@ -65,6 +65,7 @@ typedef struct {
     Ensight_VariableArray *variable;
     Ensight_TimeArray *time;
     char dirname[PATH_MAX];
+    u32 dirname_len;
 } Ensight_Case;
 
 typedef struct {
@@ -116,6 +117,7 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
 
 
     cfd_dirname(case_filename, encase->dirname);
+    encase->dirname_len = (u32)strlen(encase->dirname);
     cfd_info("Dirname: %s", encase->dirname);
 
     s32 time_set_idx = -1;
@@ -505,13 +507,22 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
 CFD_LIB u32 ensight_get_geometry_model_filename(const Ensight_Case * restrict encase, u32 time_idx, u8 * restrict filename_buffer, u32 filename_buffer_size) {
     CFD_CHECK_NULL(encase);
     CFD_CHECK_NULL(filename_buffer);
-    if(unlikely(encase->geometry->model->fs != -1)) {
+
+    if (unlikely(encase->geometry == NULL || encase->geometry->model == NULL)) {
+        cfd_error("ensight_get_geometry_model_filename(): geometry model is not defined in case file!");
+        return 0;
+    }
+
+    const Ensight_GeometryElem *model = encase->geometry->model;
+
+    if (unlikely(model->fs != -1)) {
         cfd_error("ensight_get_geometry_model_filename(): file sets are not supported yet!");
         return 0;
     }
 
-    u32 dirname_len = (u32)strlen(encase->dirname);
-    u32 filename_len = dirname_len + 1 + (u32)encase->geometry->model->filename.len + 1;
+    u32 dirname_len = encase->dirname_len;
+    u32 model_filename_len = (u32)model->filename.len;
+    u32 filename_len = dirname_len + 1 + model_filename_len + 1;
     if (unlikely(filename_len > filename_buffer_size)) {
         cfd_error("ensight_get_geometry_model_filename(): length of the filename is longer than the provided buffer size (%u > %u)", filename_len, filename_buffer_size);
         return 0;
@@ -524,12 +535,12 @@ CFD_LIB u32 ensight_get_geometry_model_filename(const Ensight_Case * restrict en
 
     filename_buffer[offset++] = '/';
 
-    memcpy(filename_buffer + offset, encase->geometry->model->filename.buffer, encase->geometry->model->filename.len);
-    offset += (u32)encase->geometry->model->filename.len;
+    memcpy(filename_buffer + offset, model->filename.buffer, model_filename_len);
+    offset += model_filename_len;
 
     filename_buffer[offset] = '\0';
 
-    s32 ts = encase->geometry->model->ts;
+    s32 ts = model->ts;
     if (ts != -1) {
         if (unlikely(encase->time == NULL)) {
             cfd_error("there are no time sets in case file!");
@@ -543,9 +554,15 @@ CFD_LIB u32 ensight_get_geometry_model_filename(const Ensight_Case * restrict en
         }
 
         Ensight_Time *t = &encase->time->elems[time_set_idx];
+
+        if (unlikely(time_idx >= t->number_of_steps)) {
+            cfd_error("time_idx = %u is out of bounds (number_of_steps = %u)!", time_idx, t->number_of_steps);
+            return 0;
+        }
+
         u32 file_num = t->filename_start_number + time_idx * t->filename_increment;
 
-        ensight_resolve_filename_in_place(filename_buffer + dirname_len + 1, (u32)encase->geometry->model->filename.len, file_num);
+        ensight_resolve_filename_in_place(filename_buffer + dirname_len + 1, model_filename_len, file_num);
     }
 
     return offset;
