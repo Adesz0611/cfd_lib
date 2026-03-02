@@ -75,6 +75,7 @@ typedef struct {
 
 CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const char *case_filename, CFD_File *file);
 CFD_LIB u32 ensight_get_geometry_model_filename(const Ensight_Case * restrict encase, u32 time_idx, u8 * restrict filename_buffer, u32 filename_buffer_size);
+CFD_LIB b32 ensight_parse_geometry_model(const Ensight_Case * restrict encase, CFD_File * restrict file);
 
 CFD_INTERNAL Ensight_SectionType ensight_get_section_type(Str8 s);
 CFD_INTERNAL Str8 cfd_file_ensight_readline(CFD_File *file);
@@ -82,6 +83,8 @@ CFD_INTERNAL void ensight_split_key_value(Str8 str, Str8 *key, Str8 *value);
 CFD_INTERNAL Str8 ensight_consume_word(Str8 *src);
 CFD_INTERNAL Ensight_Case_Sizes ensight_get_case_sizes(CFD_File file);
 CFD_INTERNAL void ensight_resolve_filename_in_place(u8 *filename, u32 filename_len, u32 filename_num);
+CFD_INTERNAL u8 *ensight_read_80_bytes(CFD_File *f);
+CFD_INTERNAL CFD_Cell_Type ensight_read_element_type(u8 *line, b32 *is_ghost);
 
 CFD_INTERNAL force_inline s32 ensight_get_time_set_index(const Ensight_Case * restrict encase, s32 ts) {
     for (s32 time_set_idx = 0; time_set_idx < (s32)encase->time->len; ++time_set_idx)
@@ -90,6 +93,30 @@ CFD_INTERNAL force_inline s32 ensight_get_time_set_index(const Ensight_Case * re
 
     return -1;
 }
+
+CFD_INTERNAL force_inline u8 *ensight_read_n_bytes(CFD_File *restrict f, u64 n) {
+    if (unlikely(n > f->size - f->cur)) return NULL;
+
+    u8 *ret = f->buffer + f->cur;
+    f->cur += n;
+
+    return ret;
+}
+
+CFD_INTERNAL force_inline u8 *ensight_read_80_bytes(CFD_File *restrict f) {
+    return ensight_read_n_bytes(f, 80);
+}
+
+CFD_INTERNAL force_inline b32 ensight_consume_i32(CFD_File *f, s32 *out_val) {
+    u8 *ptr = ensight_read_n_bytes(f, sizeof(s32));
+    if (unlikely(ptr == NULL)) return false;
+
+    *out_val = *(s32 *)ptr;
+    return true;
+}
+
+// WARNING: only use after ensight_read_80_bytes!
+#define ensight_starts_with(line, s) cfd_mem_equals((line), "" s "", sizeof(s) - 1)
 
 #ifdef CFD_LIB_IMPLEMENTATION
 
@@ -568,6 +595,107 @@ CFD_LIB u32 ensight_get_geometry_model_filename(const Ensight_Case * restrict en
     return offset;
 }
 
+CFD_LIB b32 ensight_parse_geometry_model(const Ensight_Case * restrict encase, CFD_File * restrict file) {
+    CFD_CHECK_NULL(encase);
+    CFD_CHECK_NULL(file);
+
+    u8 *line = ensight_read_80_bytes(file);
+    if (unlikely(line == NULL || !ensight_starts_with(line, "C Binary"))) {
+        cfd_error("not a valid ensight gold geometry file!");
+        return false;
+    }
+
+    // Skip the description lines
+    if (unlikely(ensight_read_n_bytes(file, 2 * 80) == NULL)) return false;
+
+    line = ensight_read_80_bytes(file);
+    if (unlikely(line == NULL || !ensight_starts_with(line, "node id "))) return false;
+
+    line += 8;
+    b32 has_node_ids = ensight_starts_with(line, "given") | ensight_starts_with(line, "ignore");
+
+    line = ensight_read_80_bytes(file);
+    if (unlikely(line == NULL || !ensight_starts_with(line, "element id "))) return false;
+
+    line += 11;
+    b32 has_element_ids = ensight_starts_with(line, "given") | ensight_starts_with(line, "ignore");
+
+    cfd_info("node ids: %s", has_node_ids ? "true" : "false");
+    cfd_info("element ids: %s", has_element_ids ? "true" : "false");
+
+    line = ensight_read_80_bytes(file);
+    if (unlikely(line == NULL)) return false;
+
+    if (ensight_starts_with(line, "extents")) {
+        // TODO: store AABB
+        ensight_read_n_bytes(file, 6 * sizeof(f32));
+        line = ensight_read_80_bytes(file);
+        if (unlikely(line == NULL)) return false;
+    }
+
+    u32 num_parts = 0;
+    u64 total_num_nodes = 0;
+
+    CFD_Cell_Type cell_type;
+    b32 is_ghost;
+
+    u64 num_cells_of_type[CFD_CELL_TYPE_COUNT];
+    memset(num_cells_of_type, 0, CFD_CELL_TYPE_COUNT * sizeof(u64));
+
+    while (line != NULL && ensight_starts_with(line, "part")) {
+        ++num_parts;
+        ensight_read_n_bytes(file, 4);
+        ensight_read_80_bytes(file);
+
+        while (likely(!IS_CFD_FILE_EOF(file))) {
+            line = ensight_read_80_bytes(file);
+            if (unlikely(line == NULL)) break;
+
+            if (ensight_starts_with(line, "part")) break;
+
+            if (ensight_starts_with(line, "coordinates")) {
+                s32 num_of_nodes;
+                if (unlikely(!ensight_consume_i32(file, &num_of_nodes))) return false;
+
+                if (has_node_ids)
+                    ensight_read_n_bytes(file, (u64)num_of_nodes * sizeof(s32));
+
+                ensight_read_n_bytes(file, 3 * (u64)num_of_nodes * sizeof(f32));
+
+                total_num_nodes += (u64)num_of_nodes;
+            } else if (ensight_starts_with(line, "block")) {
+                cfd_error("structured data is not implemented yet!");
+                return false;
+            } else if ((cell_type = ensight_read_element_type(line, &is_ghost)) != CFD_CELL_UNKNOWN) {
+                s32 num_of_elements;
+                if (unlikely(!ensight_consume_i32(file, &num_of_elements))) return false;
+
+                if (has_element_ids)
+                    ensight_read_n_bytes(file, (u64)num_of_elements * sizeof(s32));
+
+                if (!is_ghost)
+                    num_cells_of_type[cell_type] += (u64)num_of_elements;
+
+                u8 node_count = cfd_get_cell_node_count(cell_type);
+                if (node_count == 0) {
+                    cfd_error("nsided/nfaced elements are not supported yet!");
+                    return false;
+                }
+
+                ensight_read_n_bytes(file, (u64)node_count * (u64)num_of_elements * sizeof(s32));
+            } else {
+                cfd_error("unknown block or corrupted file: %.80s", (const char*)line);
+                return false;
+            }
+        }
+    }
+
+    cfd_info("number of parts: %u", num_parts);
+    cfd_info("total number of nodes: %zu", total_num_nodes);
+
+    return true;
+}
+
 CFD_INTERNAL Ensight_SectionType ensight_get_section_type(Str8 s) {
     if (s.len == 0) return ENSIGHT_NOSECTION;
 
@@ -756,6 +884,70 @@ CFD_INTERNAL void ensight_resolve_filename_in_place(u8 *filename, u32 filename_l
         filename[i] = (u8)((filename_num % 10) + '0');
         filename_num /= 10;
     }
+}
+
+CFD_INTERNAL CFD_Cell_Type ensight_read_element_type(u8 *line, b32 *is_ghost) {
+    *is_ghost = false;
+
+    if (line[0] == 'g' && line[1] == '_') {
+        line += 2;
+        *is_ghost = true;
+    }
+
+    switch (line[0]) {
+        case 'b':
+            if (line[1] == 'a' && line[2] == 'r') {
+                if (line[3] == '2') return CFD_CELL_BAR2;
+                if (line[3] == '3') return CFD_CELL_BAR3;
+            }
+            break;
+        case 'h':
+            if (line[1] == 'e' && line[2] == 'x' && line[3] == 'a') {
+                if (line[4] == '8')                   return CFD_CELL_HEXA8;
+                if (line[4] == '2' && line[5] == '0') return CFD_CELL_HEXA20;
+            }
+            break;
+        case 'n':
+            ++line;
+            if (ensight_starts_with(line, "faced")) return CFD_CELL_NFACED;
+            if (ensight_starts_with(line, "sided")) return CFD_CELL_NSIDED;
+            break;
+        case 'p':
+            ++line;
+            if (ensight_starts_with(line, "enta")) {
+                if (line[4] == '6')                   return CFD_CELL_PENTA6;
+                if (line[4] == '1' && line[5] == '5') return CFD_CELL_PENTA15;
+            }
+            if (ensight_starts_with(line, "oint")) {
+                return CFD_CELL_POINT;
+            }
+            if (ensight_starts_with(line, "yramid")) {
+                if (line[6] == '5')                   return CFD_CELL_PYRAMID5;
+                if (line[6] == '1' && line[7] == '3') return CFD_CELL_PYRAMID13;
+            }
+            break;
+        case 'q':
+            if (line[1] == 'u' && line[2] == 'a' && line[3] == 'd') {
+                if (line[4] == '4') return CFD_CELL_QUAD4;
+                if (line[4] == '8') return CFD_CELL_QUAD8;
+            }
+            break;
+        case 't':
+            ++line;
+            if (ensight_starts_with(line, "etra")) {
+                if (line[4] == '4')                   return CFD_CELL_TETRA4;
+                if (line[4] == '1' && line[5] == '0') return CFD_CELL_TETRA10;
+            }
+            if (ensight_starts_with(line, "ria")) {
+                if (line[3] == '3') return CFD_CELL_TRIA3;
+                if (line[3] == '6') return CFD_CELL_TRIA6;
+            }
+            break;
+        default:
+            return CFD_CELL_UNKNOWN;
+    }
+
+    return CFD_CELL_UNKNOWN;
 }
 
 #endif /* CFD_LIB_IMPLEMENTATION */

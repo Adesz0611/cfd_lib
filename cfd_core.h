@@ -107,6 +107,51 @@ typedef enum {
     CFD_LOG_LEVEL_ERROR,
 } CFD_Log_Level;
 
+typedef enum {
+    CFD_CELL_POINT = 0,
+    CFD_CELL_BAR2,
+    CFD_CELL_BAR3,
+    CFD_CELL_TRIA3,
+    CFD_CELL_TRIA6,
+    CFD_CELL_QUAD4,
+    CFD_CELL_QUAD8,
+    CFD_CELL_TETRA4,
+    CFD_CELL_TETRA10,
+    CFD_CELL_PYRAMID5,
+    CFD_CELL_PYRAMID13,
+    CFD_CELL_PENTA6,
+    CFD_CELL_PENTA15,
+    CFD_CELL_HEXA8,
+    CFD_CELL_HEXA20,
+    CFD_CELL_NSIDED,
+    CFD_CELL_NFACED,
+    CFD_CELL_TYPE_COUNT,
+    CFD_CELL_UNKNOWN,
+} CFD_Cell_Type;
+
+CFD_INTERNAL u8 cfd_cell_num_nodes[] = {
+    /* [CFD_CELL_POINT]      =*/ 1,
+    /* [CFD_CELL_BAR2]       =*/ 2,
+    /* [CFD_CELL_BAR3]       =*/ 3,
+    /* [CFD_CELL_TRIA3]      =*/ 3,
+    /* [CFD_CELL_TRIA6]      =*/ 6,
+    /* [CFD_CELL_QUAD4]      =*/ 4,
+    /* [CFD_CELL_QUAD8]      =*/ 8,
+    /* [CFD_CELL_TETRA4]     =*/ 4,
+    /* [CFD_CELL_TETRA10]    =*/ 10,
+    /* [CFD_CELL_PYRAMID5]   =*/ 5,
+    /* [CFD_CELL_PYRAMID13]  =*/ 13,
+    /* [CFD_CELL_PENTA6]     =*/ 6,
+    /* [CFD_CELL_PENTA15]    =*/ 15,
+    /* [CFD_CELL_HEXA8]      =*/ 8,
+    /* [CFD_CELL_HEXA20]     =*/ 20,
+
+    /* [CFD_CELL_NSIDED]     =*/ 0,
+    /* [CFD_CELL_NFACED]     =*/ 0,
+    /* [CFD_CELL_TYPE_COUNT] =*/ 0,
+    /* [CFD_CELL_UNKNOWN]    =*/ 0,
+};
+
 typedef struct CFD_Arena {
     u8 *buffer;
     u64 offset;
@@ -151,6 +196,8 @@ CFD_LIB void cfd_arena_init_from_buffer(CFD_Arena *arena, void *buffer, u64 size
 CFD_LIB void cfd_arena_reset(CFD_Arena *arena);
 CFD_LIB b32 cfd_arena_destroy(CFD_Arena *arena);
 
+CFD_INTERNAL void *cfd_arena_out_of_memory(CFD_Arena *arena, u64 size);
+
 static force_inline void *cfd_arena_alloc_aligned(CFD_Arena *arena, u64 size, u64 alignment) {
     u64 current_ptr = (u64)arena->buffer + arena->offset;
     u64 aligned_ptr = (current_ptr + (alignment - 1)) & ~(alignment - 1);
@@ -172,8 +219,7 @@ static force_inline void *cfd_arena_alloc_aligned(CFD_Arena *arena, u64 size, u6
         return (void *)aligned_ptr;
     }
 
-    cfd_error("Arena out of memory! Requested: %zu, Available: %zu", size, arena->cap - arena->offset);
-    return NULL;
+    return cfd_arena_out_of_memory(arena, size);
 }
 
 static force_inline void *cfd_arena_alloc(CFD_Arena *arena, u64 size) {
@@ -202,6 +248,10 @@ static force_inline void *cfd_arena_alloc_zero(CFD_Arena *arena, u64 size) {
 #define cfd_arena_push_array_zero(arena, type, count) \
     (type *)cfd_arena_alloc_zero_aligned((arena), sizeof(type) * (count), align_of(type))
 
+
+CFD_INTERNAL force_inline b32 cfd_mem_equals(const void *restrict a, const void *restrict b, u64 n) {
+    return memcmp(a, b, n) == 0;
+}
 
 // FILE HANDLING
 
@@ -281,6 +331,10 @@ static force_inline u32 str8_to_u32(Str8 s) {
         n = n * 10 + *s.buffer++ - '0';
 
     return n;
+}
+
+CFD_INTERNAL force_inline u8 cfd_get_cell_node_count(CFD_Cell_Type type) {
+    return cfd_cell_num_nodes[type];
 }
 
 #ifdef CFD_LIB_IMPLEMENTATION
@@ -689,6 +743,11 @@ CFD_LIB f32 str8_to_f32(Str8 s) {
     }
 
     return sign * (f32)result;
+}
+
+CFD_INTERNAL void *cfd_arena_out_of_memory(CFD_Arena *arena, u64 size) {
+    cfd_error("Arena out of memory! Requested: %zu, Available: %zu", size, arena->cap - arena->offset);
+    return NULL;
 }
 
 #endif /* CFD_LIB_IMPLEMENTATION */
