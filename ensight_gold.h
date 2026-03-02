@@ -73,12 +73,22 @@ typedef struct {
 } Ensight_Case_Sizes;
 
 CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const char *case_filename, CFD_File *file);
+CFD_LIB u32 ensight_get_geometry_model_filename(const Ensight_Case * restrict encase, u32 time_idx, u8 * restrict filename_buffer, u32 filename_buffer_size);
 
 CFD_INTERNAL Ensight_SectionType ensight_get_section_type(Str8 s);
 CFD_INTERNAL Str8 cfd_file_ensight_readline(CFD_File *file);
 CFD_INTERNAL void ensight_split_key_value(Str8 str, Str8 *key, Str8 *value);
 CFD_INTERNAL Str8 ensight_consume_word(Str8 *src);
 CFD_INTERNAL Ensight_Case_Sizes ensight_get_case_sizes(CFD_File file);
+CFD_INTERNAL void ensight_resolve_filename_in_place(u8 *filename, u32 filename_len, u32 filename_num);
+
+CFD_INTERNAL force_inline s32 ensight_get_time_set_index(const Ensight_Case * restrict encase, s32 ts) {
+    for (s32 time_set_idx = 0; time_set_idx < (s32)encase->time->len; ++time_set_idx)
+        if (encase->time->elems[time_set_idx].ts == ts)
+            return time_set_idx;
+
+    return -1;
+}
 
 #ifdef CFD_LIB_IMPLEMENTATION
 
@@ -492,6 +502,55 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
     return true;
 }
 
+CFD_LIB u32 ensight_get_geometry_model_filename(const Ensight_Case * restrict encase, u32 time_idx, u8 * restrict filename_buffer, u32 filename_buffer_size) {
+    CFD_CHECK_NULL(encase);
+    CFD_CHECK_NULL(filename_buffer);
+    if(unlikely(encase->geometry->model->fs != -1)) {
+        cfd_error("ensight_get_geometry_model_filename(): file sets are not supported yet!");
+        return 0;
+    }
+
+    u32 dirname_len = (u32)strlen(encase->dirname);
+    u32 filename_len = dirname_len + 1 + (u32)encase->geometry->model->filename.len + 1;
+    if (unlikely(filename_len > filename_buffer_size)) {
+        cfd_error("ensight_get_geometry_model_filename(): length of the filename is longer than the provided buffer size (%u > %u)", filename_len, filename_buffer_size);
+        return 0;
+    }
+
+    u32 offset = 0;
+
+    memcpy(filename_buffer, encase->dirname, dirname_len);
+    offset += dirname_len;
+
+    filename_buffer[offset++] = '/';
+
+    memcpy(filename_buffer + offset, encase->geometry->model->filename.buffer, encase->geometry->model->filename.len);
+    offset += (u32)encase->geometry->model->filename.len;
+
+    filename_buffer[offset] = '\0';
+
+    s32 ts = encase->geometry->model->ts;
+    if (ts != -1) {
+        if (unlikely(encase->time == NULL)) {
+            cfd_error("there are no time sets in case file!");
+            return 0;
+        }
+
+        s32 time_set_idx = ensight_get_time_set_index(encase, ts);
+        if (unlikely(time_set_idx == -1)) {
+            cfd_error("time set = %d not found in case file!", ts);
+            return 0;
+        }
+
+        Ensight_Time *t = &encase->time->elems[time_set_idx];
+        u32 file_num = t->filename_start_number + time_idx * t->filename_increment;
+
+        ensight_resolve_filename_in_place(filename_buffer + dirname_len + 1, (u32)encase->geometry->model->filename.len, file_num);
+    }
+
+    return offset;
+}
+
 CFD_INTERNAL Ensight_SectionType ensight_get_section_type(Str8 s) {
     if (s.len == 0) return ENSIGHT_NOSECTION;
 
@@ -659,6 +718,27 @@ CFD_INTERNAL Ensight_Case_Sizes ensight_get_case_sizes(CFD_File file) {
     cfd_info("var_count = %d", sizes.var_count);
     cfd_info("time_count = %d", sizes.time_count);
     return sizes;
+}
+
+CFD_INTERNAL void ensight_resolve_filename_in_place(u8 *filename, u32 filename_len, u32 filename_num) {
+    s32 end_star = -1;
+    for (s32 i = (s32)filename_len - 1; i >= 0; --i) {
+        if (filename[i] == '*') {
+            end_star = i;
+            break;
+        }
+    }
+
+    if (unlikely(end_star == -1)) return;
+
+    s32 start_star = end_star;
+    while (start_star > 0 && filename[start_star - 1] == '*')
+        --start_star;
+
+    for (s32 i = end_star; i >= start_star; --i) {
+        filename[i] = (u8)((filename_num % 10) + '0');
+        filename_num /= 10;
+    }
 }
 
 #endif /* CFD_LIB_IMPLEMENTATION */

@@ -82,6 +82,24 @@ typedef u32 b32;
     #define align_of(T) _Alignof(T)
 #endif
 
+#if defined(__cplusplus)
+    #define restrict __restrict
+#elif defined(_MSC_VER)
+    #define restrict __restrict
+#endif
+
+#if defined(__GNUC__) || defined(__clang__)
+    #define CFD_ATTR_PRINTF(fmt_idx, args_idx) __attribute__((format(printf, fmt_idx, args_idx)))
+    #define CFD_MSVC_FORMAT
+#elif defined(_MSC_VER)
+    #include <sal.h>
+    #define CFD_ATTR_PRINTF(fmt_idx, args_idx)
+    #define CFD_MSVC_FORMAT _Printf_format_string_
+#else
+    #define CFD_ATTR_PRINTF(fmt_idx, args_idx)
+    #define CFD_MSVC_FORMAT
+#endif
+
 
 typedef enum {
     CFD_LOG_LEVEL_INFO,
@@ -110,7 +128,7 @@ typedef struct Str8 {
 
 #define CFD_CHECK_NULL(ptr) \
     if (unlikely(!(ptr))) { \
-        cfd_error("%s: parameter '%s' is NULL!", __func__, #ptr); \
+        cfd_error("%s(): parameter '%s' is NULL!", __func__, #ptr); \
         return false; \
     }
 
@@ -123,7 +141,8 @@ typedef void (*CFD_Log_Fn)(CFD_Log_Level level, const char *fmt, va_list args);
 
 CFD_LIB void cfd_log(CFD_Log_Level level, const char *fmt, ...);
 CFD_LIB void cfd_set_logger(CFD_Log_Fn fn);
-CFD_LIB void cfd_default_logger(CFD_Log_Level level, const char *fmt, va_list);
+CFD_ATTR_PRINTF(2, 0)
+CFD_LIB void cfd_default_logger(CFD_Log_Level level, CFD_MSVC_FORMAT const char *fmt, va_list);
 
 
 // ARENA
@@ -294,7 +313,8 @@ CFD_LIB void cfd_set_logger(CFD_Log_Fn fn) {
     g_logger = fn ? fn : cfd_default_logger;
 }
 
-CFD_LIB void cfd_default_logger(CFD_Log_Level level, const char *fmt, va_list args) {
+CFD_ATTR_PRINTF(2, 0)
+CFD_LIB void cfd_default_logger(CFD_Log_Level level, CFD_MSVC_FORMAT const char *fmt, va_list args) {
     switch(level) {
         case CFD_LOG_LEVEL_INFO:
             printf("[INFO]: ");
