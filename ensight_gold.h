@@ -736,6 +736,8 @@ CFD_LIB b32 ensight_parse_geometry_model_info(CFD_Arena *arena, CFD_Arena *scrat
     b32 has_element_ids = ensight_starts_with(line, "given") | ensight_starts_with(line, "ignore");
 
 
+    model_info->has_aabb = false;
+
     line = ensight_read_80_bytes(file);
     if (unlikely(line == NULL)) return false;
 
@@ -891,6 +893,8 @@ CFD_LIB b32 ensight_parse_model_merge_parts(CFD_Arena *arena, const Ensight_Case
 
     CFD_Cell_Type cell_type;
     b32 is_ghost;
+
+    file->cur = 0;
 
     u64 skip_bytes = 5 * 80;
     skip_bytes += (u64)model_info->has_aabb * (80 + 6 * sizeof(f32));
