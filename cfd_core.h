@@ -152,6 +152,23 @@ CFD_INTERNAL u8 cfd_cell_num_nodes[] = {
     /* [CFD_CELL_UNKNOWN]    =*/ 0,
 };
 
+typedef struct V3 {
+    f32 x, y, z;
+} V3;
+
+typedef struct CFD_Cell_Group {
+    CFD_Cell_Type type;
+    u64 num_cells;
+    u64 *connectivity;
+} CFD_Cell_Group;
+
+typedef struct CFD_UnstructuredGrid {
+    V3 *vertices;
+    u64 num_vertices;
+    CFD_Cell_Group *cell_groups;
+    u32 num_cell_types; // = len(cell_groups)
+} CFD_UnstructuredGrid;
+
 typedef struct CFD_Arena {
     u8 *buffer;
     u64 offset;
@@ -198,10 +215,23 @@ CFD_LIB b32 cfd_arena_destroy(CFD_Arena *arena);
 
 CFD_INTERNAL void *cfd_arena_out_of_memory(CFD_Arena *arena, u64 size);
 
+#define cfd_align_forward(offset, alignment) (((offset) + ((alignment) - 1)) & ~((alignment) - 1))
+
+static force_inline b32 cfd_arena_align(CFD_Arena *arena, u64 alignment) {
+    u64 new_offset = cfd_align_forward(arena->offset, alignment);
+
+    if (unlikely(new_offset > arena->cap)) {
+        cfd_error("Arena capacity exceeded during alignment!");
+        return false;
+    }
+
+    arena->offset = new_offset;
+    return true;
+}
+
 static force_inline void *cfd_arena_alloc_aligned(CFD_Arena *arena, u64 size, u64 alignment) {
-    u64 current_ptr = (u64)arena->buffer + arena->offset;
-    u64 aligned_ptr = (current_ptr + (alignment - 1)) & ~(alignment - 1);
-    u64 new_offset = (aligned_ptr - (uintptr_t)arena->buffer) + size;
+    u64 aligned_offset = cfd_align_forward(arena->offset, alignment);
+    u64 new_offset = aligned_offset + size;
 
     if (likely(new_offset <= arena->cap)) {
 #if defined(_WIN32)
@@ -216,7 +246,8 @@ static force_inline void *cfd_arena_alloc_aligned(CFD_Arena *arena, u64 size, u6
         }
 #endif
         arena->offset = new_offset;
-        return (void *)aligned_ptr;
+
+        return (void *)(arena->buffer + aligned_offset);
     }
 
     return cfd_arena_out_of_memory(arena, size);
@@ -333,7 +364,7 @@ static force_inline u32 str8_to_u32(Str8 s) {
     return n;
 }
 
-CFD_INTERNAL force_inline u8 cfd_get_cell_node_count(CFD_Cell_Type type) {
+CFD_INTERNAL force_inline u8 cfd_get_cell_node_count(u32 type) {
     return cfd_cell_num_nodes[type];
 }
 

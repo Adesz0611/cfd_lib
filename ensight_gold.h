@@ -14,7 +14,36 @@ typedef enum {
 } Ensight_SectionType;
 
 typedef struct {
+    s32 key; // -1 if empty
+    s32 value;
+} Ensight_Part_Slot;
+
+typedef struct {
+    Ensight_Part_Slot *slots;
+    u32 cap;
+} Ensight_Part_Map;
+
+typedef struct {
+    u64 num_cells_of_type[CFD_CELL_TYPE_COUNT];
+    u8 cell_type_idx_map[CFD_CELL_TYPE_COUNT];
+    u64 *node_offsets;
+    V3 min_aabb, max_aabb;
+    Ensight_Part_Map part_map;
+    u64 num_coordinates;
+    u32 num_element_types;
+
+    u32 num_parts;
+    b32 has_node_ids;
+    b32 has_element_ids;
+    b32 has_aabb;
+} Ensight_Model_Info;
+
+typedef struct {
     Str8 filename;
+
+    Ensight_Model_Info **model_info_array;
+    u32 model_info_array_len;
+
     s32 ts, fs; // -1 if not given
     b32 change_coords_only;
 } Ensight_GeometryElem;
@@ -75,7 +104,8 @@ typedef struct {
 
 CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const char *case_filename, CFD_File *file);
 CFD_LIB u32 ensight_get_geometry_model_filename(const Ensight_Case * restrict encase, u32 time_idx, u8 * restrict filename_buffer, u32 filename_buffer_size);
-CFD_LIB b32 ensight_parse_geometry_model(const Ensight_Case * restrict encase, CFD_File * restrict file);
+CFD_LIB b32 ensight_parse_geometry_model_info(CFD_Arena *arena, CFD_Arena *scratch_arena, Ensight_Case *encase, Ensight_Model_Info *model_info, CFD_File *restrict file);
+CFD_LIB b32 ensight_parse_model_merge_parts(CFD_Arena *arena, const Ensight_Case *restrict encase, Ensight_Model_Info *model_info, CFD_File * restrict file, CFD_UnstructuredGrid *mesh);
 
 CFD_INTERNAL Ensight_SectionType ensight_get_section_type(Str8 s);
 CFD_INTERNAL Str8 cfd_file_ensight_readline(CFD_File *file);
@@ -113,6 +143,49 @@ CFD_INTERNAL force_inline b32 ensight_consume_i32(CFD_File *f, s32 *out_val) {
 
     *out_val = *(s32 *)ptr;
     return true;
+}
+
+CFD_INTERNAL force_inline b32 ensight_part_map_create(CFD_Arena *arena, Ensight_Part_Map *map, u32 cap) {
+    CFD_CHECK_NULL(arena);
+    CFD_CHECK_NULL(map);
+
+    map->cap = cap;
+    map->slots = cfd_arena_push_array(arena, Ensight_Part_Slot, cap);
+    if (unlikely(map->slots == NULL)) return false;
+
+    memset(map->slots, -1, cap * sizeof(Ensight_Part_Slot));
+
+    return true;
+}
+
+CFD_INTERNAL force_inline u32 ensight_part_number_hash(const Ensight_Part_Map *restrict map, s32 part_number) {
+    return (u32)part_number % map->cap;
+}
+
+CFD_INTERNAL force_inline void ensight_part_map_insert(const Ensight_Part_Map *restrict map, s32 key, s32 value) {
+    u32 idx = ensight_part_number_hash(map, key);
+
+    while (map->slots[idx].key != -1)
+        idx = (idx + 1) % map->cap;
+
+    Ensight_Part_Slot *slot = &map->slots[idx];
+    slot->key = key;
+    slot->value = value;
+}
+
+CFD_INTERNAL force_inline s32 ensight_part_map_get(const Ensight_Part_Map *restrict map, s32 key) {
+    u32 idx = ensight_part_number_hash(map, key);
+
+    u32 it = 0;
+
+    while (map->slots[idx].key != key && map->slots[idx].key != -1) {
+        idx = (idx + 1) % map->cap;
+
+        if (unlikely(++it >= map->cap))
+            return -1;
+    }
+
+    return map->slots[idx].value;
 }
 
 // WARNING: only use after ensight_read_80_bytes!
@@ -527,6 +600,37 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
 
     }
 
+    if (unlikely(encase->geometry == NULL)) {
+        cfd_error("GEOMETRY section not found in case file!");
+        return false;
+    }
+
+    if (unlikely(encase->geometry->model == NULL)) return false;
+
+    s32 model_ts = encase->geometry->model->ts;
+    u32 model_info_array_len;
+
+    if (model_ts == -1) {
+        model_info_array_len = 1;
+    } else {
+        if (unlikely(encase->time == NULL)) return false;
+
+        time_set_idx = ensight_get_time_set_index(encase, model_ts);
+
+        if (unlikely(time_set_idx == -1)) {
+            cfd_error("no time set found with number: %d", model_ts);
+            return false;
+        }
+
+        Ensight_Time *time = &encase->time->elems[time_set_idx];
+        model_info_array_len = time->number_of_steps;
+    }
+
+    Ensight_GeometryElem *model = encase->geometry->model;
+    model->model_info_array = (Ensight_Model_Info **)cfd_arena_alloc(arena, sizeof(Ensight_Model_Info *) * model_info_array_len);
+    model->model_info_array_len = model_info_array_len;
+
+    memset(model->model_info_array, 0, sizeof(Ensight_Model_Info *) * model_info_array_len);
 
     return true;
 }
@@ -595,43 +699,66 @@ CFD_LIB u32 ensight_get_geometry_model_filename(const Ensight_Case * restrict en
     return offset;
 }
 
-CFD_LIB b32 ensight_parse_geometry_model(const Ensight_Case * restrict encase, CFD_File * restrict file) {
+CFD_LIB b32 ensight_parse_geometry_model_info(CFD_Arena *arena, CFD_Arena *scratch_arena, Ensight_Case *encase, Ensight_Model_Info *model_info, CFD_File *restrict file) {
+    CFD_CHECK_NULL(arena);
+    CFD_CHECK_NULL(scratch_arena);
     CFD_CHECK_NULL(encase);
+    CFD_CHECK_NULL(model_info);
     CFD_CHECK_NULL(file);
 
     u8 *line = ensight_read_80_bytes(file);
     if (unlikely(line == NULL || !ensight_starts_with(line, "C Binary"))) {
-        cfd_error("not a valid ensight gold geometry file!");
+        cfd_error("not a valid binary ensight gold geometry file!");
         return false;
     }
 
     // Skip the description lines
     if (unlikely(ensight_read_n_bytes(file, 2 * 80) == NULL)) return false;
 
+    // Node id
     line = ensight_read_80_bytes(file);
-    if (unlikely(line == NULL || !ensight_starts_with(line, "node id "))) return false;
+    if (unlikely(line == NULL || !ensight_starts_with(line, "node id "))) {
+        cfd_error("'node id' label not found in geometry file!");
+        return false;
+    }
 
     line += 8;
     b32 has_node_ids = ensight_starts_with(line, "given") | ensight_starts_with(line, "ignore");
 
+    // Element id
     line = ensight_read_80_bytes(file);
-    if (unlikely(line == NULL || !ensight_starts_with(line, "element id "))) return false;
+    if (unlikely(line == NULL || !ensight_starts_with(line, "element id "))) {
+        cfd_error("'element id' label not found in geometry file!");
+        return false;
+    }
 
     line += 11;
     b32 has_element_ids = ensight_starts_with(line, "given") | ensight_starts_with(line, "ignore");
 
-    cfd_info("node ids: %s", has_node_ids ? "true" : "false");
-    cfd_info("element ids: %s", has_element_ids ? "true" : "false");
 
     line = ensight_read_80_bytes(file);
     if (unlikely(line == NULL)) return false;
 
     if (ensight_starts_with(line, "extents")) {
-        // TODO: store AABB
-        ensight_read_n_bytes(file, 6 * sizeof(f32));
+        model_info->has_aabb = true;
+        V3 *min = &model_info->min_aabb;
+        V3 *max = &model_info->max_aabb;
+
+        min->x = *(f32 *)ensight_read_n_bytes(file, sizeof(f32));
+        max->x = *(f32 *)ensight_read_n_bytes(file, sizeof(f32));
+
+        min->y = *(f32 *)ensight_read_n_bytes(file, sizeof(f32));
+        max->y = *(f32 *)ensight_read_n_bytes(file, sizeof(f32));
+
+        min->z = *(f32 *)ensight_read_n_bytes(file, sizeof(f32));
+        max->z = *(f32 *)ensight_read_n_bytes(file, sizeof(f32));
+
         line = ensight_read_80_bytes(file);
         if (unlikely(line == NULL)) return false;
     }
+
+    model_info->has_node_ids    = has_node_ids;
+    model_info->has_element_ids = has_element_ids;
 
     u32 num_parts = 0;
     u64 total_num_nodes = 0;
@@ -639,12 +766,23 @@ CFD_LIB b32 ensight_parse_geometry_model(const Ensight_Case * restrict encase, C
     CFD_Cell_Type cell_type;
     b32 is_ghost;
 
-    u64 num_cells_of_type[CFD_CELL_TYPE_COUNT];
+    u64 *num_cells_of_type = model_info->num_cells_of_type;
     memset(num_cells_of_type, 0, CFD_CELL_TYPE_COUNT * sizeof(u64));
+
+    if (unlikely(!cfd_arena_align(scratch_arena, align_of(s32)))) return false;
+    s32 *part_numbers = (s32 *)(scratch_arena->buffer + scratch_arena->offset);
+
+    if (unlikely(!cfd_arena_align(arena, align_of(u64)))) return false;
+    u64 *node_offsets = (u64 *)(arena->buffer + arena->offset);
 
     while (line != NULL && ensight_starts_with(line, "part")) {
         ++num_parts;
-        ensight_read_n_bytes(file, 4);
+
+        s32 part_num = *(s32 *)ensight_read_n_bytes(file, 4);
+        s32 *part_num_ptr = cfd_arena_push_type(scratch_arena, s32);
+        *part_num_ptr = part_num;
+
+        //cfd_info("%u. part: part number = %d", num_parts, part_num);
         ensight_read_80_bytes(file);
 
         while (likely(!IS_CFD_FILE_EOF(file))) {
@@ -662,6 +800,7 @@ CFD_LIB b32 ensight_parse_geometry_model(const Ensight_Case * restrict encase, C
 
                 ensight_read_n_bytes(file, 3 * (u64)num_of_nodes * sizeof(f32));
 
+                *cfd_arena_push_type(arena, u64) = total_num_nodes;
                 total_num_nodes += (u64)num_of_nodes;
             } else if (ensight_starts_with(line, "block")) {
                 cfd_error("structured data is not implemented yet!");
@@ -690,8 +829,151 @@ CFD_LIB b32 ensight_parse_geometry_model(const Ensight_Case * restrict encase, C
         }
     }
 
+    if (unlikely(!ensight_part_map_create(arena, &model_info->part_map, num_parts * 2))) return false;
+
+    model_info->node_offsets = node_offsets;
+
+    for (s32 part_idx = 0; part_idx < (s32)num_parts; ++part_idx)
+        ensight_part_map_insert(&model_info->part_map, part_numbers[part_idx], part_idx);
+
+    u32 element_type_idx = 0;
+    u32 num_element_types = 0;
+    for (u32 i = 0; i < CFD_CELL_TYPE_COUNT; ++i) {
+        if (num_cells_of_type[i] != 0) {
+            ++num_element_types;
+            model_info->cell_type_idx_map[i] = (u8)(element_type_idx++);
+        }
+    }
+
+    model_info->num_parts = num_parts;
+    model_info->num_coordinates = total_num_nodes;
+    model_info->num_element_types = num_element_types;
+
+    cfd_info("number of element types: %u", num_element_types);
     cfd_info("number of parts: %u", num_parts);
     cfd_info("total number of nodes: %zu", total_num_nodes);
+
+    return true;
+}
+
+CFD_LIB b32 ensight_parse_model_merge_parts(CFD_Arena *arena, const Ensight_Case *restrict encase, Ensight_Model_Info *model_info, CFD_File * restrict file, CFD_UnstructuredGrid *mesh) {
+    CFD_CHECK_NULL(arena);
+    CFD_CHECK_NULL(encase);
+    CFD_CHECK_NULL(model_info);
+    CFD_CHECK_NULL(file);
+    CFD_CHECK_NULL(mesh);
+
+    mesh->vertices = cfd_arena_push_array(arena, V3, model_info->num_coordinates);
+    mesh->num_vertices = model_info->num_coordinates;
+    mesh->num_cell_types = model_info->num_element_types;
+    mesh->cell_groups = cfd_arena_push_array(arena, CFD_Cell_Group, model_info->num_element_types);
+
+    CFD_Cell_Group *cell_groups = mesh->cell_groups;
+    u64 *num_cells_of_type = model_info->num_cells_of_type;
+    u32 num_cell_types = 0;
+    for (u32 i = 0; i < CFD_CELL_TYPE_COUNT; ++i) {
+        if (num_cells_of_type[i] != 0) {
+            u64 num_cells = num_cells_of_type[i];
+            u64 node_count = (u64)cfd_get_cell_node_count(i) * num_cells;
+
+            CFD_Cell_Group *cell_group = &cell_groups[num_cell_types++];
+            cell_group->type = (CFD_Cell_Type)i;
+            cell_group->num_cells = num_cells;
+            cell_group->connectivity = cfd_arena_push_array(arena, u64, node_count);
+        }
+    }
+
+
+    u64 cell_type_offsets[CFD_CELL_TYPE_COUNT];
+    memset(cell_type_offsets, 0, CFD_CELL_TYPE_COUNT * sizeof(u64));
+
+    u64 vertices_offset = 0;
+
+    CFD_Cell_Type cell_type;
+    b32 is_ghost;
+
+    u64 skip_bytes = 5 * 80;
+    skip_bytes += (u64)model_info->has_aabb * (80 + 6 * sizeof(f32));
+    ensight_read_n_bytes(file, skip_bytes);
+
+    const u32 num_parts = model_info->num_parts;
+    const b32 has_node_ids = model_info->has_node_ids;
+    const b32 has_element_ids = model_info->has_element_ids;
+    const u8 *cell_type_idx_map = model_info->cell_type_idx_map;
+    const u64 *node_offsets = model_info->node_offsets;
+
+    u8 *line;
+
+    for (u32 part_idx = 0; part_idx < num_parts; ++part_idx) {
+        ensight_read_n_bytes(file, 80 + 1 * sizeof(s32) + 80);
+
+        u64 current_part_vertex_offset = node_offsets[part_idx];
+
+        while (!IS_CFD_FILE_EOF(file)) {
+            line = ensight_read_80_bytes(file);
+
+            if (ensight_starts_with(line, "part")) {
+                file->cur -= 80;
+                break;
+            }
+            else if (ensight_starts_with(line, "coordinates")) {
+                s32 num_of_nodes;
+                ensight_consume_i32(file, &num_of_nodes);
+
+                if (has_node_ids)
+                    ensight_read_n_bytes(file, (u64)num_of_nodes * sizeof(s32));
+
+                f32 *base_ptr = (f32 *)(file->buffer + file->cur);
+
+                const f32 *restrict raw_x = base_ptr;
+                const f32 *restrict raw_y = base_ptr + num_of_nodes;
+                const f32 *restrict raw_z = base_ptr + 2 * num_of_nodes;
+                V3  *restrict vertices = mesh->vertices + vertices_offset;
+
+                for (s32 i = 0; i < num_of_nodes; ++i) {
+                    vertices[i].x = raw_x[i];
+                    vertices[i].y = raw_y[i];
+                    vertices[i].z = raw_z[i];
+                }
+
+
+                vertices_offset += (u64)num_of_nodes;
+
+                u64 coords_byte_size = (u64)num_of_nodes * 3 * sizeof(f32);
+                file->cur += coords_byte_size;
+            } else if ((cell_type = ensight_read_element_type(line, &is_ghost)) != CFD_CELL_UNKNOWN) {
+                s32 num_of_elements;
+                ensight_consume_i32(file, &num_of_elements);
+
+                if (has_element_ids)
+                    file->cur += (u64)num_of_elements * sizeof(s32);
+
+                u8 node_count = cfd_get_cell_node_count(cell_type);
+                if (unlikely(node_count == 0)) {
+                    cfd_error("nsided/nfaced elements are not supported yet!");
+                    return false;
+                }
+
+                u64 elements_size = (u64)node_count * (u64)num_of_elements;
+
+                if (likely(!is_ghost)) {
+                    u64 *target = cell_groups[cell_type_idx_map[cell_type]].connectivity + cell_type_offsets[cell_type];
+                    const s32 *restrict raw_indices = (const s32 *)(file->buffer + file->cur);
+
+                    for (u64 i = 0; i < elements_size; ++i) {
+                        target[i] = (u64)raw_indices[i] - 1 + current_part_vertex_offset;
+                    }
+
+                    cell_type_offsets[cell_type] += elements_size;
+                }
+
+
+                file->cur += elements_size * sizeof(s32);
+            } else {
+                break;
+            }
+        }
+    }
 
     return true;
 }
