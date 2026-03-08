@@ -746,14 +746,20 @@ CFD_LIB b32 ensight_parse_geometry_model_info(CFD_Arena *arena, CFD_Arena *scrat
         V3 *min = &model_info->min_aabb;
         V3 *max = &model_info->max_aabb;
 
-        min->x = *(f32 *)ensight_read_n_bytes(file, sizeof(f32));
-        max->x = *(f32 *)ensight_read_n_bytes(file, sizeof(f32));
+        f32 *aabb_ptr = (f32 *)ensight_read_n_bytes(file, 6 * sizeof(f32));
+        if (aabb_ptr == NULL) {
+            cfd_info("no extents values found in geometry file");
+            return false;
+        }
 
-        min->y = *(f32 *)ensight_read_n_bytes(file, sizeof(f32));
-        max->y = *(f32 *)ensight_read_n_bytes(file, sizeof(f32));
+        min->x = *(aabb_ptr++);
+        max->x = *(aabb_ptr++);
 
-        min->z = *(f32 *)ensight_read_n_bytes(file, sizeof(f32));
-        max->z = *(f32 *)ensight_read_n_bytes(file, sizeof(f32));
+        min->y = *(aabb_ptr++);
+        max->y = *(aabb_ptr++);
+
+        min->z = *(aabb_ptr++);
+        max->z = *(aabb_ptr);
 
         line = ensight_read_80_bytes(file);
         if (unlikely(line == NULL)) return false;
@@ -780,8 +786,16 @@ CFD_LIB b32 ensight_parse_geometry_model_info(CFD_Arena *arena, CFD_Arena *scrat
     while (line != NULL && ensight_starts_with(line, "part")) {
         ++num_parts;
 
-        s32 part_num = *(s32 *)ensight_read_n_bytes(file, 4);
+        s32 *part_ptr = (s32 *)ensight_read_n_bytes(file, 4);
+        if (unlikely(part_ptr == NULL)) {
+            cfd_error("part number not found in geometry file");
+            return false;
+        }
+
+        s32 part_num = *part_ptr;
         s32 *part_num_ptr = cfd_arena_push_type(scratch_arena, s32);
+        if (part_num_ptr == NULL) return false;
+
         *part_num_ptr = part_num;
 
         //cfd_info("%u. part: part number = %d", num_parts, part_num);
@@ -802,7 +816,9 @@ CFD_LIB b32 ensight_parse_geometry_model_info(CFD_Arena *arena, CFD_Arena *scrat
 
                 ensight_read_n_bytes(file, 3 * (u64)num_of_nodes * sizeof(f32));
 
-                *cfd_arena_push_type(arena, u64) = total_num_nodes;
+                u64 *part_num_nodes_ptr = cfd_arena_push_type(arena, u64);
+                if (unlikely(part_num_nodes_ptr == NULL)) return false;
+                *part_num_nodes_ptr = total_num_nodes;
                 total_num_nodes += (u64)num_of_nodes;
             } else if (ensight_starts_with(line, "block")) {
                 cfd_error("structured data is not implemented yet!");
@@ -922,7 +938,7 @@ CFD_LIB b32 ensight_parse_model_merge_parts(CFD_Arena *arena, const Ensight_Case
             }
             else if (ensight_starts_with(line, "coordinates")) {
                 s32 num_of_nodes;
-                ensight_consume_i32(file, &num_of_nodes);
+                if (unlikely(!ensight_consume_i32(file, &num_of_nodes))) return false;
 
                 if (has_node_ids)
                     ensight_read_n_bytes(file, (u64)num_of_nodes * sizeof(s32));
@@ -947,7 +963,7 @@ CFD_LIB b32 ensight_parse_model_merge_parts(CFD_Arena *arena, const Ensight_Case
                 file->cur += coords_byte_size;
             } else if ((cell_type = ensight_read_element_type(line, &is_ghost)) != CFD_CELL_UNKNOWN) {
                 s32 num_of_elements;
-                ensight_consume_i32(file, &num_of_elements);
+                if (unlikely(!ensight_consume_i32(file, &num_of_elements))) return false;
 
                 if (has_element_ids)
                     file->cur += (u64)num_of_elements * sizeof(s32);

@@ -308,10 +308,11 @@ CFD_LIB b32 cfd_extract_surface(CFD_Arena *arena, CFD_Arena *scratch_arena,
         u64 num_cells = group->num_cells;
         CFD_Cell_Type type = group->type;
 
+        u64 cell_idx;
 #ifdef _OPENMP
         #pragma omp parallel for schedule(static)
 #endif
-        for (u64 cell_idx = 0; cell_idx < num_cells; ++cell_idx) {
+        for (cell_idx = 0; cell_idx < num_cells; ++cell_idx) {
             u64 fo = face_offset + cell_idx * (u64)fpc;
             cfd_generate_cell_faces(type, conn + cell_idx * node_count, faces + fo);
             for (u32 face_idx = 0; face_idx < fpc; ++face_idx) {
@@ -338,10 +339,11 @@ CFD_LIB b32 cfd_extract_surface(CFD_Arena *arena, CFD_Arena *scratch_arena,
         return false;
     }
 
+    u64 i;
 #ifdef _OPENMP
     #pragma omp parallel for schedule(static)
 #endif
-    for (u64 i = 0; i < total_faces; ++i) {
+    for (i = 0; i < total_faces; ++i) {
         pairs[i].hash = cfd_hash_face_key(faces[i].key);
         pairs[i].face_idx = i;
     }
@@ -375,7 +377,7 @@ CFD_LIB b32 cfd_extract_surface(CFD_Arena *arena, CFD_Arena *scratch_arena,
     }
 
     {
-        u64 i = 0;
+        i = 0;
         while (i < total_faces) {
             u64 j = i + 1;
             while (j < total_faces && pairs[j].hash == pairs[i].hash)
@@ -412,7 +414,7 @@ CFD_LIB b32 cfd_extract_surface(CFD_Arena *arena, CFD_Arena *scratch_arena,
 
     // 4. Count boundary triangles
     u64 num_boundary_tris = 0;
-    for (u64 i = 0; i < total_faces; ++i) {
+    for (i = 0; i < total_faces; ++i) {
         if (is_boundary[i]) {
             const CFD_Face_Entry *face = &faces[pairs[i].face_idx];
             num_boundary_tris += (face->v[3] != (u64)-1) ? 2 : 1;
@@ -446,7 +448,7 @@ CFD_LIB b32 cfd_extract_surface(CFD_Arena *arena, CFD_Arena *scratch_arena,
         CFD_Cell_Ref *restrict tcell = surface->tria_to_cell;
         u64 tri = 0;
 
-        for (u64 i = 0; i < total_faces; ++i) {
+        for (i = 0; i < total_faces; ++i) {
             if (!is_boundary[i]) continue;
 
             u64 fi = pairs[i].face_idx;
