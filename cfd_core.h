@@ -212,7 +212,7 @@ CFD_LIB b32 cfd_arena_init(CFD_Arena *arena, u64 size);
 CFD_LIB void cfd_arena_init_from_buffer(CFD_Arena *arena, void *buffer, u64 size);
 CFD_LIB void cfd_arena_reset(CFD_Arena *arena);
 CFD_LIB b32 cfd_arena_destroy(CFD_Arena *arena);
-CFD_LIB void cfd_arena_log_usage(CFD_Arena *arena);
+CFD_LIB void cfd_arena_log_usage(const char *arena_name, CFD_Arena *arena);
 
 CFD_INTERNAL void *cfd_arena_out_of_memory(CFD_Arena *arena, u64 size);
 
@@ -777,22 +777,22 @@ CFD_LIB f32 str8_to_f32(Str8 s) {
     return sign * (f32)result;
 }
 
-CFD_LIB void cfd_arena_log_usage(CFD_Arena *arena) {
+CFD_LIB void cfd_arena_log_usage(const char *arena_name, CFD_Arena *arena) {
     if (arena == NULL) return;
 
     u64 offset = arena->offset;
 
     if (offset >= GB(1)) {
         double gb = (double)offset / (double)GB(1);
-        cfd_info("Arena usage: %.4f GB", gb);
+        cfd_info("%s arena usage: %.4f GB", arena_name, gb);
     } else if (offset >= MB(1)) {
         double mb = (double)offset / (double)MB(1);
-        cfd_info("Arena usage: %.4f MB", mb);
+        cfd_info("%s arena usage: %.4f MB", arena_name, mb);
     } else if (offset >= KB(1)) {
         double kb = (double)offset / (double)KB(1);
-        cfd_info("Arena usage: %.4f KB", kb);
+        cfd_info("%s arena usage: %.4f KB", arena_name, kb);
     } else {
-        cfd_info("Arena usage: %llu bytes", (unsigned long long)offset);
+        cfd_info("%s arena usage: %llu bytes", arena_name, (unsigned long long)offset);
     }
 }
 
