@@ -26,6 +26,7 @@ typedef struct {
 typedef struct {
     u64 num_cells_of_type[CFD_CELL_TYPE_COUNT];
     u8 cell_type_idx_map[CFD_CELL_TYPE_COUNT];
+    s32 **num_elems_per_type;
     u64 *node_offsets;
     V3 min_aabb, max_aabb;
     Ensight_Part_Map part_map;
@@ -102,10 +103,12 @@ typedef struct {
     u32 time_count;
 } Ensight_Case_Sizes;
 
-CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const char *case_filename, CFD_File *file);
-CFD_LIB u32 ensight_get_geometry_model_filename(const Ensight_Case * restrict encase, u32 time_idx, u8 * restrict filename_buffer, u32 filename_buffer_size);
-CFD_LIB b32 ensight_parse_geometry_model_info(CFD_Arena *arena, CFD_Arena *scratch_arena, Ensight_Case *encase, Ensight_Model_Info *model_info, CFD_File *restrict file);
-CFD_LIB b32 ensight_parse_model_merge_parts(CFD_Arena *arena, const Ensight_Case *restrict encase, Ensight_Model_Info *model_info, CFD_File * restrict file, CFD_UnstructuredGrid *mesh);
+CFD_LIB b32  ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const char *case_filename, CFD_File *file);
+CFD_LIB u32  ensight_get_geometry_model_filename(const Ensight_Case * restrict encase, u32 time_idx, u8 * restrict filename_buffer, u32 filename_buffer_size);
+CFD_LIB u32  ensight_get_variable_filename(const Ensight_Case *restrict encase, u32 variable_idx, u32 time_idx, u8 *restrict filename_buffer, u32 filename_buffer_size);
+CFD_LIB b32  ensight_parse_geometry_model_info(CFD_Arena *arena, CFD_Arena *scratch_arena, Ensight_Case *encase, Ensight_Model_Info *model_info, CFD_File *restrict file);
+CFD_LIB b32  ensight_parse_model_merge_parts(CFD_Arena *arena, const Ensight_Case *restrict encase, Ensight_Model_Info *model_info, CFD_File * restrict file, CFD_UnstructuredGrid *mesh);
+CFD_LIB f32 *ensight_parse_variable_per_element(CFD_Arena *arena, const Ensight_Case *restrict encase, Ensight_Model_Info *model_info, CFD_File *restrict file, u8 dim);
 
 CFD_INTERNAL Ensight_SectionType ensight_get_section_type(Str8 s);
 CFD_INTERNAL Str8 cfd_file_ensight_readline(CFD_File *file);
@@ -699,6 +702,85 @@ CFD_LIB u32 ensight_get_geometry_model_filename(const Ensight_Case * restrict en
     return offset;
 }
 
+CFD_LIB u32 ensight_get_variable_filename(const Ensight_Case *restrict encase, u32 variable_idx, u32 time_idx, u8 *restrict filename_buffer, u32 filename_buffer_size) {
+    CFD_CHECK_NULL(encase);
+    CFD_CHECK_NULL(filename_buffer);
+    (void)variable_idx;
+    (void)time_idx;
+    (void)filename_buffer_size;
+
+    if (encase->variable == NULL) {
+        cfd_error("ensight_get_variable_filename(): variable section is not defined in case file!");
+        return 0;
+    }
+
+    const Ensight_VariableArray *var_array = encase->variable;
+    if (unlikely(variable_idx >= var_array->len)) {
+        cfd_error("ensight_get_variable_filename(): variable index is out of range!");
+        return 0;
+    }
+
+    const Ensight_Variable *variable = &var_array->elems[variable_idx];
+
+    if (unlikely(variable->fs != -1)) {
+        cfd_error("ensight_get_variable_filename(): file sets are not supported yet!");
+        return 0;
+    }
+
+    u32 dirname_len = encase->dirname_len;
+    u32 variable_filename_len = (u32)variable->filename.len;
+    u32 filename_len = dirname_len + 1 + variable_filename_len + 1;
+    if (unlikely(filename_len > filename_buffer_size)) {
+        cfd_error("ensight_get_variable_filename(): length of the filename is longer than the provided buffer size (%u > %u)", filename_len, filename_buffer_size);
+        return 0;
+    }
+
+    u32 offset = 0;
+
+    memcpy(filename_buffer, encase->dirname, dirname_len);
+    offset += dirname_len;
+
+    filename_buffer[offset++] = '/';
+
+    memcpy(filename_buffer + offset, variable->filename.buffer, variable_filename_len);
+    offset += variable_filename_len;
+
+    filename_buffer[offset] = '\0';
+
+    s32 ts = variable->ts;
+    if (ts != -1) {
+        if (unlikely(encase->time == NULL)) {
+            cfd_error("there are no time sets in case file!");
+            return 0;
+        }
+
+        s32 time_set_idx = ensight_get_time_set_index(encase, ts);
+        if (unlikely(time_set_idx == -1)) {
+            cfd_error("time set = %d not found in case file!", ts);
+            return 0;
+        }
+
+        Ensight_Time *t = &encase->time->elems[time_set_idx];
+
+        if (unlikely(time_idx >= t->number_of_steps)) {
+            cfd_error("time_idx = %u is out of bounds (number_of_steps = %u)!", time_idx, t->number_of_steps);
+            return 0;
+        }
+
+        u32 file_num = t->filename_start_number + time_idx * t->filename_increment;
+
+        ensight_resolve_filename_in_place(filename_buffer + dirname_len + 1, variable_filename_len, file_num);
+    }
+
+    return offset;
+}
+
+typedef struct {
+    s32 part_num;
+    u32 num_types;
+    // invisible cell type array
+} PartInfo_Internal;
+
 CFD_LIB b32 ensight_parse_geometry_model_info(CFD_Arena *arena, CFD_Arena *scratch_arena, Ensight_Case *encase, Ensight_Model_Info *model_info, CFD_File *restrict file) {
     CFD_CHECK_NULL(arena);
     CFD_CHECK_NULL(scratch_arena);
@@ -777,12 +859,13 @@ CFD_LIB b32 ensight_parse_geometry_model_info(CFD_Arena *arena, CFD_Arena *scrat
     u64 *num_cells_of_type = model_info->num_cells_of_type;
     memset(num_cells_of_type, 0, CFD_CELL_TYPE_COUNT * sizeof(u64));
 
-    if (unlikely(!cfd_arena_align(scratch_arena, align_of(s32)))) return false;
-    s32 *part_numbers = (s32 *)(scratch_arena->buffer + scratch_arena->offset);
+    if (unlikely(!cfd_arena_align(scratch_arena, align_of(PartInfo_Internal)))) return false;
+    PartInfo_Internal *partinfos = (PartInfo_Internal *)(scratch_arena->buffer + scratch_arena->offset);
 
     if (unlikely(!cfd_arena_align(arena, align_of(u64)))) return false;
     u64 *node_offsets = (u64 *)(arena->buffer + arena->offset);
 
+    u32 num_types_per_part;
     while (line != NULL && ensight_starts_with(line, "part")) {
         ++num_parts;
 
@@ -793,10 +876,11 @@ CFD_LIB b32 ensight_parse_geometry_model_info(CFD_Arena *arena, CFD_Arena *scrat
         }
 
         s32 part_num = *part_ptr;
-        s32 *part_num_ptr = cfd_arena_push_type(scratch_arena, s32);
-        if (part_num_ptr == NULL) return false;
+        PartInfo_Internal *p_info = cfd_arena_push_type(scratch_arena, PartInfo_Internal);
+        if (p_info == NULL) return false;
 
-        *part_num_ptr = part_num;
+        p_info->part_num = part_num;
+        num_types_per_part = 0;
 
         //cfd_info("%u. part: part number = %d", num_parts, part_num);
         ensight_read_80_bytes(file);
@@ -840,19 +924,45 @@ CFD_LIB b32 ensight_parse_geometry_model_info(CFD_Arena *arena, CFD_Arena *scrat
                 }
 
                 ensight_read_n_bytes(file, (u64)node_count * (u64)num_of_elements * sizeof(s32));
+
+                s32 *ne = cfd_arena_push_type(scratch_arena, s32);
+                if (unlikely(ne == NULL)) return false;
+
+                *ne = num_of_elements;
+                ++num_types_per_part;
             } else {
                 cfd_error("unknown block or corrupted file: %.80s", (const char*)line);
                 return false;
             }
         }
+
+        p_info->num_types = num_types_per_part;
     }
 
     if (unlikely(!ensight_part_map_create(arena, &model_info->part_map, num_parts * 2))) return false;
 
+    model_info->num_elems_per_type = (s32 **)cfd_arena_alloc_aligned(arena, num_parts * sizeof(s32 *), align_of(s32 *));
+    if (model_info->num_elems_per_type == NULL) return false;
+
     model_info->node_offsets = node_offsets;
 
-    for (s32 part_idx = 0; part_idx < (s32)num_parts; ++part_idx)
-        ensight_part_map_insert(&model_info->part_map, part_numbers[part_idx], part_idx);
+    for (s32 part_idx = 0; part_idx < (s32)num_parts; ++part_idx) {
+        //(partinfos + align_of(PartInfo_Internal) - 1) & ~(align_of(PartInfo_Internal) - 1)
+        s32 *num_elems = model_info->num_elems_per_type[part_idx];
+        ensight_part_map_insert(&model_info->part_map, partinfos->part_num, part_idx);
+
+        u32 num_types = partinfos->num_types;
+        num_elems = cfd_arena_push_array(arena, s32, num_types);
+        s32 *a = (s32 *)((u8 *)partinfos + sizeof(PartInfo_Internal));
+        for (u32 i = 0; i < num_types; ++i) {
+            num_elems[i] = a[i];
+        }
+
+        model_info->num_elems_per_type[part_idx] = num_elems;
+
+        partinfos = (PartInfo_Internal *)((u64)partinfos + sizeof(PartInfo_Internal) + partinfos->num_types * sizeof(s32));
+        partinfos = (PartInfo_Internal *)(((u64)partinfos + align_of(PartInfo_Internal) - 1) & ~(align_of(PartInfo_Internal) - 1));
+    }
 
     u32 element_type_idx = 0;
     u32 num_element_types = 0;
@@ -996,6 +1106,104 @@ CFD_LIB b32 ensight_parse_model_merge_parts(CFD_Arena *arena, const Ensight_Case
     }
 
     return true;
+}
+
+CFD_LIB f32 *ensight_parse_variable_per_element(CFD_Arena *arena, const Ensight_Case *restrict encase, Ensight_Model_Info *model_info, CFD_File *restrict file, u8 dim) {
+    CFD_CHECK_NULL(arena);
+    CFD_CHECK_NULL(encase);
+    CFD_CHECK_NULL(model_info);
+    CFD_CHECK_NULL(file);
+
+    u64 total_cells = 0;
+    for (u32 i = 0; i < CFD_CELL_TYPE_COUNT; ++i)
+        total_cells += model_info->num_cells_of_type[i];
+
+    if (unlikely(total_cells == 0)) {
+        cfd_error("ensight_parse_variable_per_element(): no cells found in model info!");
+        return NULL;
+    }
+
+    f32 *result = cfd_arena_push_array(arena, f32, total_cells * dim);
+    if (unlikely(result == NULL)) return NULL;
+
+    u64 cell_type_base[CFD_CELL_TYPE_COUNT];
+    u64 cell_type_offsets[CFD_CELL_TYPE_COUNT];
+    memset(cell_type_offsets, 0, sizeof(cell_type_offsets));
+
+    u64 offset = 0;
+    for (u32 i = 0; i < CFD_CELL_TYPE_COUNT; ++i) {
+        cell_type_base[i] = offset;
+        offset += model_info->num_cells_of_type[i];
+    }
+
+    u8 *line = ensight_read_80_bytes(file);
+    if (unlikely(line == NULL)) {
+        cfd_error("description line not found in per element variable file!");
+        return NULL;
+    }
+
+    line = ensight_read_80_bytes(file);
+    if (unlikely(line == NULL)) return NULL;
+
+    CFD_Cell_Type cell_type;
+    b32 is_ghost;
+
+    while (ensight_starts_with(line, "part")) {
+        s32 part_num;
+        if (unlikely(!ensight_consume_i32(file, &part_num))) return NULL;
+
+        s32 part_idx = ensight_part_map_get(&model_info->part_map, part_num);
+        if (unlikely(part_idx == -1)) {
+            cfd_error("ensight_parse_variable_per_element(): part number(%d) not found", part_num);
+            return NULL;
+        }
+
+        u32 elem_idx = 0;
+
+        while (likely(!IS_CFD_FILE_EOF(file))) {
+            line = ensight_read_80_bytes(file);
+            if (unlikely(line == NULL)) break;
+
+            if (ensight_starts_with(line, "part")) break;
+
+            if (ensight_starts_with(line, "block")) {
+                cfd_error("structured data is not implemented yet!");
+                return NULL;
+            } else if ((cell_type = ensight_read_element_type(line, &is_ghost)) != CFD_CELL_UNKNOWN) {
+                s32 num_of_elements = model_info->num_elems_per_type[part_idx][elem_idx++];
+                u64 num_values = (u64)num_of_elements * (u64)dim;
+
+                if (!is_ghost) {
+                    f32 *src = (f32 *)ensight_read_n_bytes(file, num_values * sizeof(f32));
+                    if (unlikely(src == NULL)) return NULL;
+
+                    u64 dest_base = (cell_type_base[cell_type] + cell_type_offsets[cell_type]) * (u64)dim;
+                    f32 *dst = result + dest_base;
+
+                    if (dim == 1) {
+                        memcpy(dst, src, (u64)num_of_elements * sizeof(f32));
+                    } else {
+                        // EnSight Gold stores vectors in SoA: [x0..xN, y0..yN, z0..zN]
+                        // Convert to AoS: [x0,y0,z0, x1,y1,z1, ...]
+                        for (s32 e = 0; e < num_of_elements; ++e) {
+                            for (u8 d = 0; d < dim; ++d) {
+                                dst[e * dim + d] = src[d * num_of_elements + e];
+                            }
+                        }
+                    }
+
+                    cell_type_offsets[cell_type] += (u64)num_of_elements;
+                } else {
+                    ensight_read_n_bytes(file, num_values * sizeof(f32));
+                }
+            } else {
+                cfd_error("unknown block or corrupted file: %.80s", (const char*)line);
+                return NULL;
+            }
+        }
+    }
+
+    return result;
 }
 
 CFD_INTERNAL Ensight_SectionType ensight_get_section_type(Str8 s) {

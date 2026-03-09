@@ -369,6 +369,8 @@ CFD_INTERNAL force_inline u8 cfd_get_cell_node_count(u32 type) {
     return cfd_cell_num_nodes[type];
 }
 
+CFD_LIB f32 *cfd_cell_data_to_node_data(CFD_Arena *arena, CFD_Arena *scratch_arena, const CFD_UnstructuredGrid *mesh, const f32 *cell_data, u8 dim);
+
 #ifdef CFD_LIB_IMPLEMENTATION
 
 #include <stdio.h>
@@ -799,6 +801,57 @@ CFD_LIB void cfd_arena_log_usage(const char *arena_name, CFD_Arena *arena) {
 CFD_INTERNAL void *cfd_arena_out_of_memory(CFD_Arena *arena, u64 size) {
     cfd_error("Arena out of memory! Requested: %zu, Available: %zu", size, arena->cap - arena->offset);
     return NULL;
+}
+
+CFD_LIB f32 *cfd_cell_data_to_node_data(CFD_Arena *arena, CFD_Arena *scratch_arena, const CFD_UnstructuredGrid *mesh, const f32 *cell_data, u8 dim) {
+    if (unlikely(!arena || !scratch_arena || !mesh || !cell_data || dim == 0)) return NULL;
+
+    u64 num_vertices = mesh->num_vertices;
+    u64 scratch_save = scratch_arena->offset;
+
+    f32 *node_data = cfd_arena_push_array_zero(arena, f32, num_vertices * dim);
+    if (unlikely(node_data == NULL)) return NULL;
+
+    u32 *counts = cfd_arena_push_array_zero(scratch_arena, u32, num_vertices);
+    if (unlikely(counts == NULL)) return NULL;
+
+    u64 cell_offset = 0;
+    for (u32 g = 0; g < mesh->num_cell_types; ++g) {
+        const CFD_Cell_Group *group = &mesh->cell_groups[g];
+        u8 node_count = cfd_get_cell_node_count(group->type);
+        const u64 *conn = group->connectivity;
+
+        for (u64 c = 0; c < group->num_cells; ++c) {
+            u64 cell_idx = cell_offset + c;
+            const f32 *src = cell_data + cell_idx * dim;
+
+            for (u8 n = 0; n < node_count; ++n) {
+                u64 vi = conn[c * node_count + n];
+                f32 *dst = node_data + vi * dim;
+                for (u8 d = 0; d < dim; ++d)
+                    dst[d] += src[d];
+                counts[vi]++;
+            }
+        }
+        cell_offset += group->num_cells;
+    }
+
+    u64 i;
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(static) if(num_vertices > 10000)
+#endif
+    for (i = 0; i < num_vertices; ++i) {
+        if (counts[i] > 0) {
+            f32 inv = 1.0f / (f32)counts[i];
+            f32 *dst = node_data + i * dim;
+            for (u8 d = 0; d < dim; ++d)
+                dst[d] *= inv;
+        }
+    }
+
+    scratch_arena->offset = scratch_save;
+
+    return node_data;
 }
 
 #endif /* CFD_LIB_IMPLEMENTATION */
