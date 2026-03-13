@@ -188,10 +188,10 @@ typedef struct Str8 {
     u64 len;
 } Str8;
 
-#define CFD_CHECK_NULL(ptr) \
+#define CFD_CHECK_NULL(ptr, ret_value) \
     if (unlikely(!(ptr))) { \
         cfd_error("%s(): parameter '%s' is NULL!", __func__, #ptr); \
-        return false; \
+        return (ret_value); \
     }
 
 // LOGGING

@@ -263,10 +263,10 @@ CFD_INTERNAL void cfd_radix_sort_hash_pairs_parallel(
 CFD_LIB b32 cfd_extract_surface(CFD_Arena *arena, CFD_Arena *scratch_arena,
                                  const CFD_UnstructuredGrid *mesh,
                                  CFD_Surface_Mesh *surface) {
-    CFD_CHECK_NULL(arena);
-    CFD_CHECK_NULL(scratch_arena);
-    CFD_CHECK_NULL(mesh);
-    CFD_CHECK_NULL(surface);
+    CFD_CHECK_NULL(arena, false);
+    CFD_CHECK_NULL(scratch_arena, false);
+    CFD_CHECK_NULL(mesh, false);
+    CFD_CHECK_NULL(surface, false);
 
     // 1. Count total face entries
     u64 total_faces = 0;
