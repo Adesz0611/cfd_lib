@@ -27,6 +27,7 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <string.h>
+#include <float.h>
 
 typedef int8_t s8;
 typedef int16_t s16;
@@ -61,9 +62,14 @@ typedef u32 b32;
 #endif
 
 #ifdef _MSC_VER
-#define force_inline __forceinline
-#elif defined (__GNUC__)
-#define force_inline inline __attribute__((always_inline))
+    #define force_inline __forceinline
+    #include <intrin.h>
+    #define cfd_atomic_add_u32(ptr, val) _InterlockedExchangeAdd((long volatile*)(ptr), (long)(val))
+#elif defined (__GNUC__) || defined (__clang__)
+    #define force_inline inline __attribute__((always_inline))
+    #define cfd_atomic_add_u32(ptr, val) __sync_fetch_and_add((ptr), (val))
+#else
+    #error "unsupported compiler!"
 #endif
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -156,6 +162,52 @@ typedef struct V3 {
     f32 x, y, z;
 } V3;
 
+CFD_INTERNAL force_inline V3 v3_zero(void) {
+    V3 r;
+    r.x = r.y = r.z = 0.0f;
+    return r;
+}
+
+CFD_INTERNAL force_inline V3 v3_add(V3 a, V3 b) {
+    V3 r;
+    r.x = a.x + b.x;
+    r.y = a.y + b.y;
+    r.z = a.z + b.z;
+    return r;
+}
+
+CFD_INTERNAL force_inline V3 v3_sub(V3 a, V3 b) {
+    V3 r;
+    r.x = a.x - b.x;
+    r.y = a.y - b.y;
+    r.z = a.z - b.z;
+    return r;
+}
+
+CFD_INTERNAL force_inline V3 v3_scale(V3 v, f32 s) {
+    V3 r;
+    r.x = v.x * s;
+    r.y = v.y * s;
+    r.z = v.z * s;
+    return r;
+}
+
+CFD_INTERNAL force_inline f32 v3_dot(V3 a, V3 b) {
+    return a.x*b.x + a.y*b.y + a.z*b.z;
+}
+
+CFD_INTERNAL force_inline V3 v3_cross(V3 a, V3 b) {
+    V3 r;
+    r.x = a.y*b.z - a.z*b.y;
+    r.y = a.z*b.x - a.x*b.z;
+    r.z = a.x*b.y - a.y*b.x;
+    return r;
+}
+
+CFD_INTERNAL force_inline f32 v3_length_sq(V3 v) {
+    return v3_dot(v, v);
+}
+
 typedef struct CFD_Cell_Group {
     CFD_Cell_Type type;
     u64 num_cells;
@@ -166,7 +218,9 @@ typedef struct CFD_UnstructuredGrid {
     V3 *vertices;
     u64 num_vertices;
     CFD_Cell_Group *cell_groups;
+    V3 aabb_min, aabb_max;
     u32 num_cell_types; // = len(cell_groups)
+    b32 has_aabb;
 } CFD_UnstructuredGrid;
 
 typedef struct CFD_Arena {
@@ -370,6 +424,8 @@ CFD_INTERNAL force_inline u8 cfd_get_cell_node_count(u32 type) {
 }
 
 CFD_LIB f32 *cfd_cell_data_to_node_data(CFD_Arena *arena, CFD_Arena *scratch_arena, const CFD_UnstructuredGrid *mesh, const f32 *cell_data, u8 dim);
+CFD_LIB void cfd_calculate_aabb(V3 *restrict vertices, u64 num_vertices, V3 *restrict out_min, V3 *restrict out_max);
+CFD_LIB void cfd_get_cell_aabb(CFD_UnstructuredGrid *mesh, u32 group_idx, u64 cell_idx, V3 *out_min, V3 *out_max);
 
 #ifdef CFD_LIB_IMPLEMENTATION
 
@@ -852,6 +908,63 @@ CFD_LIB f32 *cfd_cell_data_to_node_data(CFD_Arena *arena, CFD_Arena *scratch_are
     scratch_arena->offset = scratch_save;
 
     return node_data;
+}
+
+CFD_LIB void cfd_calculate_aabb(V3 *restrict vertices, u64 num_vertices, V3 *restrict out_min, V3 *restrict out_max) {
+    f32 min_x =  FLT_MAX, min_y =  FLT_MAX, min_z =  FLT_MAX;
+    f32 max_x = -FLT_MAX, max_y = -FLT_MAX, max_z = -FLT_MAX;
+
+    for (u64 vert_idx = 0; vert_idx < num_vertices; ++vert_idx) {
+        V3 *v = &vertices[vert_idx];
+
+        f32 vx = v->x;
+        f32 vy = v->y;
+        f32 vz = v->z;
+
+        if (min_x > vx) min_x = vx;
+        if (min_y > vy) min_y = vy;
+        if (min_z > vz) min_z = vz;
+
+        if (max_x < vx) max_x = vx;
+        if (max_y < vy) max_y = vy;
+        if (max_z < vz) max_z = vz;
+    }
+
+    out_min->x = min_x; out_min->y = min_y; out_min->z = min_z;
+    out_max->x = max_x; out_max->y = max_y; out_max->z = max_z;
+}
+
+CFD_LIB void cfd_get_cell_aabb(CFD_UnstructuredGrid *mesh, u32 group_idx, u64 cell_idx, V3 *out_min, V3 *out_max) {
+    CFD_Cell_Group *group = &mesh->cell_groups[group_idx];
+    u8 nodes_per_cell = cfd_get_cell_node_count(group->type);
+    if (unlikely(nodes_per_cell == 0)) {
+        cfd_error("Unsupported cell type in cfd_get_cell_aabb(): group %u, type %u", group_idx, (u32)group->type);
+        *out_min = v3_zero();
+        *out_max = v3_zero();
+        return;
+    }
+
+    u64 *cell_nodes = &group->connectivity[cell_idx * nodes_per_cell];
+
+    V3 bmin = {  FLT_MAX,  FLT_MAX,  FLT_MAX };
+    V3 bmax = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+
+    for (u32 i = 0; i < nodes_per_cell; ++i) {
+        u64 vertex_idx = cell_nodes[i];
+
+        V3 v = mesh->vertices[vertex_idx];
+
+        if (v.x < bmin.x) bmin.x = v.x;
+        if (v.y < bmin.y) bmin.y = v.y;
+        if (v.z < bmin.z) bmin.z = v.z;
+
+        if (v.x > bmax.x) bmax.x = v.x;
+        if (v.y > bmax.y) bmax.y = v.y;
+        if (v.z > bmax.z) bmax.z = v.z;
+    }
+
+    *out_min = bmin;
+    *out_max = bmax;
 }
 
 #endif /* CFD_LIB_IMPLEMENTATION */

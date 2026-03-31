@@ -50,6 +50,7 @@ CFD_INTERNAL VTK_Cell_Type cfd_type_to_vtk_type[] = {
 
 // This function is only for debugging purposes!
 CFD_LIB b32 cfd_unstructured_grid_to_vtk_file(CFD_UnstructuredGrid *mesh, const char *export_filename);
+CFD_LIB b32 cfd_points_to_vtk(V3 *vertices, u64 vertex_count, f32 *values, u8 dim, const char *export_filename);
 
 #ifdef CFD_LIB_IMPLEMENTATION
 #include <stdio.h>
@@ -113,6 +114,61 @@ CFD_LIB b32 cfd_unstructured_grid_to_vtk_file(CFD_UnstructuredGrid *mesh, const 
 
     fclose(f);
 
+    return true;
+}
+
+CFD_LIB b32 cfd_points_to_vtk(V3 *vertices, u64 vertex_count, f32 *values, u8 dim, const char *export_filename) {
+    FILE *f = fopen(export_filename, "wb");
+    if (f == NULL) {
+#ifdef _MSC_VER
+        char error_str[256];
+        strerror_s(error_str, 256, errno);
+        cfd_error("couldn't open '%s' file for writing: %s", export_filename, error_str);
+#else
+        cfd_error("couldn't open '%s' file for writing: %s", export_filename, strerror(errno));
+#endif
+        return false;
+    }
+    fprintf(f, "# vtk DataFile Version 3.0\n");
+    fprintf(f, "Adesz's VTK exporter\n");
+    fprintf(f, "ASCII\n");
+    fprintf(f, "DATASET UNSTRUCTURED_GRID\n");
+    fprintf(f, "POINTS %zu float\n", vertex_count);
+
+    for (u64 i = 0; i < vertex_count; ++i) {
+        V3 v = vertices[i];
+        fprintf(f, "%f %f %f\n", (double)v.x, (double)v.y, (double)v.z);
+    }
+
+    fprintf(f, "CELLS %zu %zu\n", vertex_count, vertex_count * 2);
+    for (u64 i = 0; i < vertex_count; ++i) {
+        fprintf(f, "1 %zu\n", i);
+    }
+
+    fprintf(f, "CELL_TYPES %zu\n", vertex_count);
+    for (u64 i = 0; i < vertex_count; ++i) {
+        fprintf(f, "1\n");
+    }
+
+    fprintf(f, "POINT_DATA %zu\n", vertex_count);
+
+    if (dim == 1) {
+        fprintf(f, "SCALARS field float 1\n");
+        fprintf(f, "LOOKUP_TABLE default\n");
+
+        for (u64 i = 0; i < vertex_count; ++i) {
+            fprintf(f, "%f\n", (double)values[i]);
+        }
+    } else if (dim == 3) {
+        fprintf(f, "VECTORS field float\n");
+        for (u64 i = 0; i < vertex_count; ++i) {
+            fprintf(f, "%f %f %f\n",
+                (double)values[i*3 + 0],
+                (double)values[i*3 + 1],
+                (double)values[i*3 + 2]);
+        }
+    }
+    fclose(f);
     return true;
 }
 

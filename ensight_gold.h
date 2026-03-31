@@ -112,6 +112,11 @@ CFD_LIB b32  ensight_parse_model_merge_parts(CFD_Arena *arena, const Ensight_Cas
 CFD_LIB f32 *ensight_parse_variable_per_node(CFD_Arena *arena, const Ensight_Case *restrict encase, Ensight_Model_Info *model_info, CFD_File *restrict file, u8 dim);
 CFD_LIB f32 *ensight_parse_variable_per_element(CFD_Arena *arena, const Ensight_Case *restrict encase, Ensight_Model_Info *model_info, CFD_File *restrict file, u8 dim);
 
+// Wrapper functions
+CFD_LIB b32  ensight_read_case(CFD_Arena *arena, Ensight_Case *encase, const char *case_filename);
+CFD_LIB b32  ensight_read_model_merge_parts(CFD_Arena *arena, CFD_Arena *scratch_arena, Ensight_Case *encase, u32 time_idx, CFD_UnstructuredGrid *mesh);
+CFD_LIB f32 *ensight_read_variable(CFD_Arena *restrict arena, const Ensight_Case *restrict encase, u32 variable_idx, u32 time_idx);
+
 CFD_INTERNAL Ensight_SectionType ensight_get_section_type(Str8 s);
 CFD_INTERNAL Str8 cfd_file_ensight_readline(CFD_File *file);
 CFD_INTERNAL void ensight_split_key_value(Str8 str, Str8 *key, Str8 *value);
@@ -982,6 +987,8 @@ CFD_LIB b32 ensight_parse_geometry_model_info(CFD_Arena *arena, CFD_Arena *scrat
     model_info->num_coordinates = total_num_nodes;
     model_info->num_element_types = num_element_types;
 
+
+    cfd_info("number of coordinates: %zu", model_info->num_coordinates);
     cfd_info("number of element types: %u", num_element_types);
     cfd_info("number of parts: %u", num_parts);
     cfd_info("total number of nodes: %zu", total_num_nodes);
@@ -1000,6 +1007,11 @@ CFD_LIB b32 ensight_parse_model_merge_parts(CFD_Arena *arena, const Ensight_Case
     mesh->num_vertices = model_info->num_coordinates;
     mesh->num_cell_types = model_info->num_element_types;
     mesh->cell_groups = cfd_arena_push_array(arena, CFD_Cell_Group, model_info->num_element_types);
+    mesh->has_aabb = model_info->has_aabb;
+    if (mesh->has_aabb) {
+        mesh->aabb_min = model_info->min_aabb;
+        mesh->aabb_max = model_info->max_aabb;
+    }
 
     CFD_Cell_Group *cell_groups = mesh->cell_groups;
     u64 *num_cells_of_type = model_info->num_cells_of_type;
@@ -1279,6 +1291,110 @@ CFD_LIB f32 *ensight_parse_variable_per_element(CFD_Arena *arena, const Ensight_
     }
 
     return result;
+}
+
+// Wrapper functions
+CFD_LIB b32 ensight_read_case(CFD_Arena *arena, Ensight_Case *encase, const char *case_filename) {
+    CFD_CHECK_NULL(arena, false);
+    CFD_CHECK_NULL(encase, false);
+    CFD_CHECK_NULL(case_filename, false);
+
+    CFD_File f;
+
+    if (unlikely(!cfd_file_slurp((char *)case_filename, &f))) return false;
+    if (unlikely(!ensight_parse_case(arena, encase, case_filename, &f))) return false;
+
+    cfd_file_free(&f);
+    return true;
+}
+
+CFD_LIB b32 ensight_read_model_merge_parts(CFD_Arena *arena, CFD_Arena *scratch_arena, Ensight_Case *encase, u32 time_idx, CFD_UnstructuredGrid *mesh) {
+    CFD_CHECK_NULL(arena, false);
+    CFD_CHECK_NULL(scratch_arena, false);
+    CFD_CHECK_NULL(encase, false);
+    CFD_CHECK_NULL(mesh, false);
+
+    Ensight_GeometryElem *model = encase->geometry->model;
+
+    s32 time_set_idx = ensight_get_time_set_index(encase, model->ts);
+
+    Ensight_Time *time = &encase->time->elems[time_set_idx];
+
+    if (unlikely(time->number_of_steps <= time_idx)) {
+        cfd_error("ensight_read_model_merge_parts(): time index out of range!");
+        return false;
+    }
+
+    u8 filename_buffer[PATH_MAX];
+    if (unlikely(ensight_get_geometry_model_filename(encase, time_idx, filename_buffer, PATH_MAX) == 0))
+        return false;
+
+    CFD_File geo_file;
+
+    if (unlikely(!cfd_file_slurp((char*)filename_buffer, &geo_file))) return false;
+
+    b32 success = false;
+
+    time_idx = (model->ts == -1) ? 0 : time_idx;
+
+    Ensight_Model_Info *model_info = model->model_info_array[time_idx];
+
+    if (model_info == NULL) {
+        Ensight_Model_Info *new_info = cfd_arena_push_type_zero(arena, Ensight_Model_Info);
+        if (unlikely(new_info == NULL))
+            goto cleanup;
+
+        if (unlikely(!ensight_parse_geometry_model_info(arena, scratch_arena, encase, new_info, &geo_file)))
+            goto cleanup;
+
+        model->model_info_array[time_idx] = new_info;
+        model_info = new_info;
+    }
+
+    geo_file.cur = 0;
+
+    if (unlikely(!ensight_parse_model_merge_parts(arena, encase, model_info, &geo_file, mesh)))
+        goto cleanup;
+
+    success = true;
+
+cleanup:
+    cfd_file_free(&geo_file);
+    return success;
+}
+
+CFD_LIB f32 *ensight_read_variable(CFD_Arena *restrict arena, const Ensight_Case *restrict encase, u32 variable_idx, u32 time_idx) {
+    CFD_CHECK_NULL(arena, NULL);
+    CFD_CHECK_NULL(encase, NULL);
+
+    u8 filename_buffer[PATH_MAX];
+    if (unlikely(ensight_get_variable_filename(encase, variable_idx, time_idx, filename_buffer, PATH_MAX) == 0))
+        return NULL;
+
+    Ensight_GeometryElem *model = encase->geometry->model;
+    u32 model_info_idx = (model->ts == -1) ? 0 : time_idx;
+
+    Ensight_Model_Info *model_info = model->model_info_array[model_info_idx];
+    if (unlikely(model_info == NULL)) {
+        cfd_error("ensight_read_variable(): no model info cached for time index %u!", time_idx);
+        return NULL;
+    }
+
+    CFD_File f;
+    if (unlikely(!cfd_file_slurp((char*)filename_buffer, &f))) return NULL;
+
+    Ensight_Variable *var = &encase->variable->elems[variable_idx];
+    u8 dim = (var->type == ENSIGHT_VARIABLE_SCALAR_PER_NODE || var->type == ENSIGHT_VARIABLE_SCALAR_PER_ELEMENT) ? 1 : 3;
+
+    f32 *var_data;
+
+    if (var->type == ENSIGHT_VARIABLE_SCALAR_PER_NODE || var->type == ENSIGHT_VARIABLE_VECTOR_PER_NODE)
+        var_data = ensight_parse_variable_per_node(arena, encase, model_info, &f, dim);
+    else
+        var_data = ensight_parse_variable_per_element(arena, encase, model_info, &f, dim);
+
+    cfd_file_free(&f);
+    return var_data;
 }
 
 CFD_INTERNAL Ensight_SectionType ensight_get_section_type(Str8 s) {
