@@ -359,6 +359,11 @@ static force_inline Str8 Str8_From_Zstr(u8 *txt, u64 len) { Str8 res = { (u8*)tx
 
 CFD_LIB b32 str8_is_all_digits(Str8 s);
 CFD_LIB s32 str8_to_s32(Str8 s);
+
+CFD_LIB b32 str8_is_u32(Str8 s);
+CFD_LIB u32 str8_to_u32(Str8 s);
+
+CFD_LIB b32 str8_is_f32(Str8 s);
 CFD_LIB f32 str8_to_f32(Str8 s);
 
 static force_inline Str8 str8_copy(CFD_Arena *arena, Str8 s) {
@@ -408,15 +413,6 @@ static force_inline Str8 str8_rtrim(Str8 s) {
         --result.len;
 
     return result;
-}
-
-static force_inline u32 str8_to_u32(Str8 s) {
-    u32 n = 0;
-
-    while (s.len-- && *s.buffer >= '0' && *s.buffer <= '9')
-        n = n * 10 + *s.buffer++ - '0';
-
-    return n;
 }
 
 CFD_INTERNAL force_inline u8 cfd_get_cell_node_count(u32 type) {
@@ -728,7 +724,7 @@ CFD_LIB Str8 cfd_file_readline(CFD_File *file) {
 }
 
 CFD_LIB b32 str8_is_all_digits(Str8 s) {
-    if (unlikely(s.len == 0)) return false;
+    if (unlikely(s.len == 0 || s.buffer == NULL)) return false;
 
     for (u64 i = 0; i < s.len; ++i)
         if (s.buffer[i] < '0' || s.buffer[i] > '9')
@@ -739,6 +735,8 @@ CFD_LIB b32 str8_is_all_digits(Str8 s) {
 
 
 CFD_LIB s32 str8_to_s32(Str8 s) {
+    if (unlikely(s.len == 0 || s.buffer == NULL)) return 0;
+
     s32 n = 0, sign = 1;
 
     if (likely(s.len > 0)) {
@@ -759,6 +757,77 @@ CFD_LIB s32 str8_to_s32(Str8 s) {
         n = n * 10 + *s.buffer++ - '0';
 
     return n * sign;
+}
+
+CFD_LIB b32 str8_is_u32(Str8 s) {
+    if (unlikely(s.len == 0 || s.buffer == NULL)) return false;
+    if (unlikely(s.len > 10))                     return false;
+
+    u64 value = 0;
+
+    u8 *ptr = s.buffer;
+    u64 len = s.len;
+
+    while (len--) {
+        u8 c = *ptr++;
+
+        if (c < '0' || c > '9') return false;
+
+        value = value * 10 + (c - '0');
+    }
+
+    return (value <= 0xFFFFFFFF);
+}
+
+CFD_LIB u32 str8_to_u32(Str8 s) {
+    if (unlikely(s.len == 0 || s.buffer == NULL)) return 0;
+    u32 n = 0;
+
+    while (s.len-- && *s.buffer >= '0' && *s.buffer <= '9')
+        n = n * 10 + *s.buffer++ - '0';
+
+    return n;
+}
+
+CFD_LIB b32 str8_is_f32(Str8 s) {
+    if (!s.buffer || s.len == 0) return false;
+
+    u64 i = 0;
+    b32 has_digits = false;
+
+    if (i < s.len && (s.buffer[i] == '-' || s.buffer[i] == '+'))
+        i++;
+
+    while (i < s.len && s.buffer[i] >= '0' && s.buffer[i] <= '9') {
+        i++;
+        has_digits = true;
+    }
+
+    if (i < s.len && s.buffer[i] == '.') {
+        i++;
+
+        while (i < s.len && s.buffer[i] >= '0' && s.buffer[i] <= '9') {
+            i++;
+            has_digits = true;
+        }
+    }
+
+    if (!has_digits) return false;
+
+    if (i < s.len && (s.buffer[i] == 'e' || s.buffer[i] == 'E')) {
+        i++;
+
+        if (i < s.len && (s.buffer[i] == '-' || s.buffer[i] == '+'))
+            i++;
+
+        u64 exp_digits_start = i;
+        while (i < s.len && s.buffer[i] >= '0' && s.buffer[i] <= '9')
+            i++;
+
+        if (i == exp_digits_start) return false;
+    }
+
+    return (i == s.len);
 }
 
 CFD_LIB f32 str8_to_f32(Str8 s) {
