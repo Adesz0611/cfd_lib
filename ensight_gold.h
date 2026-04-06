@@ -78,12 +78,11 @@ typedef struct {
 
 typedef struct {
     Str8 description; // Empty string if not specified
-    float *time_values;
+    f32 *time_values;
+    u32 *filename_numbers;
 
     s32 ts;
     u32 number_of_steps;
-    u32 filename_start_number;
-    u32 filename_increment;
 } Ensight_Time;
 
 typedef struct {
@@ -111,6 +110,8 @@ CFD_LIB b32  ensight_parse_geometry_model_info(CFD_Arena *arena, CFD_Arena *scra
 CFD_LIB b32  ensight_parse_model_merge_parts(CFD_Arena *arena, const Ensight_Case *restrict encase, Ensight_Model_Info *model_info, CFD_File * restrict file, CFD_UnstructuredGrid *mesh);
 CFD_LIB f32 *ensight_parse_variable_per_node(CFD_Arena *arena, const Ensight_Case *restrict encase, Ensight_Model_Info *model_info, CFD_File *restrict file, u8 dim);
 CFD_LIB f32 *ensight_parse_variable_per_element(CFD_Arena *arena, const Ensight_Case *restrict encase, Ensight_Model_Info *model_info, CFD_File *restrict file, u8 dim);
+CFD_LIB b32  ensight_parse_filename_numbers_file(u32 *filename_numbers, u32 number_of_steps, Str8 file_content);
+CFD_LIB b32  ensight_parse_time_values_file(f32 *time_values, u32 number_of_steps, Str8 file_content);
 
 // Wrapper functions
 CFD_LIB b32  ensight_read_case(CFD_Arena *arena, Ensight_Case *encase, const char *case_filename);
@@ -231,6 +232,9 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
     cfd_info("Dirname: %s", encase->dirname);
 
     s32 time_set_idx = -1;
+
+    s64 filename_start_number = -1;
+    s64 filename_increment = -1;
 
     Ensight_SectionType type = ENSIGHT_NOSECTION;
 
@@ -504,33 +508,63 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
 
                         word = ensight_consume_word(&cursor_key);
                         if (str8_equals(word, str8_lit("file"))) {
-                            cfd_error("'time values file' option in TIME section is not implemented yet!");
-                            return false;
-                        }
+                            // TODO(adesz): in the feature we want to separate file
+                            // loading and case parsing, so we should implement
+                            // a Str8 time_values_file field in the
+                            // Ensight_Case structure and load data in separate
+                            // functions
+                            Str8 time_values_filename = ensight_consume_word(&value);
+                            CFD_File time_values_f;
 
-                        time->time_values = cfd_arena_push_array(arena, float, time->number_of_steps);
-                        u32 time_idx = 0;
+                            u32 dirname_len = encase->dirname_len;
 
-                        // TODO: check every value to see if it really is a float
-                        while (time_idx < time->number_of_steps) {
-                            word = ensight_consume_word(&value);
-                            if (word.len == 0) break;
-                            time->time_values[time_idx++] = str8_to_f32(word);
-                        }
+                            char fname[PATH_MAX];
+                            memcpy(fname, encase->dirname, dirname_len);
+                            fname[dirname_len] = '/';
+                            memcpy(fname + dirname_len + 1, time_values_filename.buffer, time_values_filename.len);
+                            fname[dirname_len + 1 + time_values_filename.len] = '\0';
 
-                        if (time->number_of_steps != time_idx) {
-                            while (!IS_CFD_FILE_EOF(f) && time->number_of_steps != time_idx) {
-                                line = cfd_file_ensight_readline(f);
-                                if (line.len == 0) continue;
+                            if (unlikely(!cfd_file_slurp(fname, &time_values_f))) return false;
 
-                                while (time_idx < time->number_of_steps) {
-                                    word = ensight_consume_word(&line);
-                                    if (word.len == 0) break;
-                                    time->time_values[time_idx++] = str8_to_f32(word);
+                            Str8 content;
+                            content.buffer = time_values_f.buffer;
+                            content.len = time_values_f.size;
+
+                            if (unlikely(!ensight_parse_time_values_file(time->time_values, time->number_of_steps, content))) {
+                                cfd_error("there are not enough value in '%.*s' time values file!", str8_arg(time_values_filename));
+                                return false;
+                            };
+
+                            cfd_file_free(&time_values_f);
+                        } else {
+
+                            u32 time_idx = 0;
+
+                            // TODO: check every value to see if it really is a float
+                            while (time_idx < time->number_of_steps) {
+                                word = ensight_consume_word(&value);
+                                if (word.len == 0) break;
+                                time->time_values[time_idx++] = str8_to_f32(word);
+                            }
+
+                            if (time->number_of_steps != time_idx) {
+                                while (!IS_CFD_FILE_EOF(f) && time->number_of_steps != time_idx) {
+                                    line = cfd_file_ensight_readline(f);
+                                    if (line.len == 0) continue;
+
+                                    while (time_idx < time->number_of_steps) {
+                                        word = ensight_consume_word(&line);
+                                        if (word.len == 0) break;
+                                        time->time_values[time_idx++] = str8_to_f32(word);
+                                    }
+
                                 }
-
                             }
                         }
+
+                        cfd_info("TIME VALUES:");
+                        for (u32 i = 0; i < time->number_of_steps; ++i)
+                            cfd_info("%f", (double)time->time_values[i]);
 
                     } else {
                         cfd_error("invalid key in TIME section '%.*s'!", str8_arg(key));
@@ -557,6 +591,8 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
                     }
 
                     time->number_of_steps = str8_to_u32(word);
+                    time->time_values = cfd_arena_push_array(arena, f32, time->number_of_steps);
+                    time->filename_numbers = cfd_arena_push_array(arena, u32, time->number_of_steps);
                 } else if (str8_equals(word, str8_lit("filename"))) {
                     if (unlikely(time_set_idx == -1)) {
                         cfd_error("TIME section protocol error: 'time set' must be defined before all other parameters (found '%.*s')!", str8_arg(key));
@@ -577,7 +613,17 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
                             return false;
                         }
 
-                        time->filename_start_number = str8_to_u32(word);
+                        filename_start_number = str8_to_u32(word);
+
+                        if (filename_increment != -1) {
+                            u32 *filename_numbers = time->filename_numbers;
+
+                            for (u32 i = 0; i < time->number_of_steps; ++i)
+                                filename_numbers[i] = (u32)filename_start_number + i * (u32)filename_increment;
+
+                            filename_start_number = -1;
+                            filename_increment = -1;
+                        }
                     } else if (str8_equals(word, str8_lit("increment"))) {
                         word = ensight_consume_word(&value);
                         if (unlikely(!str8_is_all_digits(word))) {
@@ -585,10 +631,76 @@ CFD_LIB b32 ensight_parse_case(CFD_Arena *arena, Ensight_Case *encase, const cha
                             return false;
                         }
 
-                        time->filename_increment = str8_to_u32(word);
+                        filename_increment = str8_to_u32(word);
+
+                        if (filename_start_number != -1) {
+                            u32 *filename_numbers = time->filename_numbers;
+
+                            for (u32 i = 0; i < time->number_of_steps; ++i)
+                                filename_numbers[i] = (u32)filename_start_number + i * (u32)filename_increment;
+
+                            filename_start_number = -1;
+                            filename_increment = -1;
+                        }
                     } else if (str8_equals(word, str8_lit("numbers"))) {
-                        cfd_error("'filename numbers' and 'filename numbers file' options in TIME section are not implemented yet!");
-                        return false;
+                        word = ensight_consume_word(&cursor_key);
+
+                        if (str8_equals(word, str8_lit("file"))) {
+                            // TODO(adesz): in the feature we want to separate
+                            // file loading and case parsing, so we should
+                            // implement a Str8 filename_numbers_file field in
+                            // the Ensight_Case structure and load data in
+                            // separate functions
+                            Str8 filename_number_filename = ensight_consume_word(&value);
+                            CFD_File filename_number_f;
+
+                            u32 dirname_len = encase->dirname_len;
+
+                            char fname[PATH_MAX];
+                            memcpy(fname, encase->dirname, dirname_len);
+                            fname[dirname_len] = '/';
+                            memcpy(fname + dirname_len + 1, filename_number_filename.buffer, filename_number_filename.len);
+                            fname[dirname_len + 1 + filename_number_filename.len] = '\0';
+
+                            if (unlikely(!cfd_file_slurp(fname, &filename_number_f))) return false;
+
+                            Str8 content;
+                            content.buffer = filename_number_f.buffer;
+                            content.len = filename_number_f.size;
+
+                            if (unlikely(!ensight_parse_filename_numbers_file(time->filename_numbers, time->number_of_steps, content))) {
+                                cfd_error("there are not enough value in '%.*s' file number file!", str8_arg(filename_number_filename));
+                                return false;
+                            };
+
+                            cfd_file_free(&filename_number_f);
+                        } else {
+                            u32 time_idx = 0;
+
+                            while (time_idx < time->number_of_steps) {
+                                word = ensight_consume_word(&value);
+                                if (word.len == 0) break;
+                                time->filename_numbers[time_idx++] = str8_to_u32(word);
+                            }
+
+                            if (time->number_of_steps != time_idx) {
+                                while (!IS_CFD_FILE_EOF(f) && time->number_of_steps != time_idx) {
+                                    line = cfd_file_ensight_readline(f);
+                                    if (line.len == 0) continue;
+
+                                    while (time_idx < time->number_of_steps) {
+                                        word = ensight_consume_word(&line);
+                                        if (word.len == 0) break;
+                                        time->filename_numbers[time_idx++] = str8_to_u32(word);
+                                    }
+
+                                }
+                            }
+                        }
+
+                        cfd_info("FILENAME NUMBERS:");
+                        for (u32 i = 0; i < time->number_of_steps; ++i)
+                            cfd_info("%u", time->filename_numbers[i]);
                     } else {
                         cfd_error("invalid key in TIME section '%.*s'!", str8_arg(key));
                         return false;
@@ -701,7 +813,7 @@ CFD_LIB u32 ensight_get_geometry_model_filename(const Ensight_Case * restrict en
             return 0;
         }
 
-        u32 file_num = t->filename_start_number + time_idx * t->filename_increment;
+        u32 file_num = t->filename_numbers[time_idx];
 
         ensight_resolve_filename_in_place(filename_buffer + dirname_len + 1, model_filename_len, file_num);
     }
@@ -771,7 +883,7 @@ CFD_LIB u32 ensight_get_variable_filename(const Ensight_Case *restrict encase, u
             return 0;
         }
 
-        u32 file_num = t->filename_start_number + time_idx * t->filename_increment;
+        u32 file_num = t->filename_numbers[time_idx];
 
         ensight_resolve_filename_in_place(filename_buffer + dirname_len + 1, variable_filename_len, file_num);
     }
@@ -1293,6 +1405,34 @@ CFD_LIB f32 *ensight_parse_variable_per_element(CFD_Arena *arena, const Ensight_
     return result;
 }
 
+CFD_LIB b32 ensight_parse_filename_numbers_file(u32 *filename_numbers, u32 number_of_steps, Str8 file_content) {
+    CFD_CHECK_NULL(filename_numbers, false);
+
+    u32 i = 0;
+
+    while (i < number_of_steps) {
+        Str8 word = ensight_consume_word(&file_content);
+        if (word.len == 0) break;
+        filename_numbers[i++] = str8_to_u32(word);
+    }
+
+    return (i == number_of_steps);
+}
+
+CFD_LIB b32 ensight_parse_time_values_file(f32 *time_values, u32 number_of_steps, Str8 file_content) {
+    CFD_CHECK_NULL(time_values, false);
+
+    u32 i = 0;
+
+    while (i < number_of_steps) {
+        Str8 word = ensight_consume_word(&file_content);
+        if (word.len == 0) break;
+        time_values[i++] = str8_to_f32(word);
+    }
+
+    return (i == number_of_steps);
+}
+
 // Wrapper functions
 CFD_LIB b32 ensight_read_case(CFD_Arena *arena, Ensight_Case *encase, const char *case_filename) {
     CFD_CHECK_NULL(arena, false);
@@ -1316,13 +1456,25 @@ CFD_LIB b32 ensight_read_model_merge_parts(CFD_Arena *arena, CFD_Arena *scratch_
 
     Ensight_GeometryElem *model = encase->geometry->model;
 
-    s32 time_set_idx = ensight_get_time_set_index(encase, model->ts);
+    if (model->ts != -1) {
+        if (unlikely(encase->time == NULL)) {
+            cfd_error("ensight_read_model_merge_parts(): model has time set, but no TIME section exists!");
+            return false;
+        }
 
-    Ensight_Time *time = &encase->time->elems[time_set_idx];
+        s32 time_set_idx = ensight_get_time_set_index(encase, model->ts);
+        if (unlikely(time_set_idx == -1)) {
+            cfd_error("ensight_read_model_merge_parts(): time set %d not found!", model->ts);
+            return false;
+        }
 
-    if (unlikely(time->number_of_steps <= time_idx)) {
-        cfd_error("ensight_read_model_merge_parts(): time index out of range!");
-        return false;
+
+        Ensight_Time *time = &encase->time->elems[time_set_idx];
+
+        if (unlikely(time->number_of_steps <= time_idx)) {
+            cfd_error("ensight_read_model_merge_parts(): time index out of range!");
+            return false;
+        }
     }
 
     u8 filename_buffer[PATH_MAX];
@@ -1514,7 +1666,8 @@ CFD_INTERNAL Str8 ensight_consume_word(Str8 *src) {
     if (src->len == 0) return token;
 
     u64 start = 0;
-    while (start < src->len && (src->buffer[start] == ' ' || src->buffer[start] == '\t'))
+    while (start < src->len && (src->buffer[start] == ' ' || src->buffer[start] == '\t'
+                                || src->buffer[start] == '\r' || src->buffer[start] == '\n' ))
         ++start;
 
     src->buffer += start;
@@ -1523,7 +1676,8 @@ CFD_INTERNAL Str8 ensight_consume_word(Str8 *src) {
     token.buffer = src->buffer;
 
     u64 end = 0;
-    while (end < src->len && !(src->buffer[end] == ' ' || src->buffer[end] == '\t'))
+    while (end < src->len && !(src->buffer[end] == ' ' || src->buffer[end] == '\t'
+                                || src->buffer[end] == '\r' || src->buffer[end] == '\n'))
         ++end;
 
     token.len = end;
