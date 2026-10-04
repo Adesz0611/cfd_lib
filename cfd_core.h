@@ -231,6 +231,11 @@ typedef struct CFD_Arena {
     b32 is_mmaped;
 } CFD_Arena;
 
+/* xoshiro256+ state. Call cfd_rng_seed() before requesting values. */
+typedef struct CFD_Rng {
+    u64 state[4];
+} CFD_Rng;
+
 typedef struct CFD_File {
     u8 *buffer;
     u64 size;
@@ -267,6 +272,19 @@ CFD_LIB void cfd_arena_init_from_buffer(CFD_Arena *arena, void *buffer, u64 size
 CFD_LIB void cfd_arena_reset(CFD_Arena *arena);
 CFD_LIB b32 cfd_arena_destroy(CFD_Arena *arena);
 CFD_LIB void cfd_arena_log_usage(const char *arena_name, CFD_Arena *arena);
+
+// RANDOM
+/* Deterministically initializes xoshiro256+ from a 64-bit seed. */
+CFD_LIB void cfd_rng_seed(CFD_Rng *rng, u64 seed);
+/* Returns a pseudorandom 64-bit value. The generator is not cryptographic. */
+CFD_LIB u64 cfd_rng_next_u64(CFD_Rng *rng);
+/* Returns a uniform pseudorandom value in [0, 1). */
+CFD_LIB f32 cfd_rng_next_f32(CFD_Rng *rng);
+/* Returns a uniform pseudorandom value in [0, 1). */
+CFD_LIB f64 cfd_rng_next_f64(CFD_Rng *rng);
+/* TODO: Profile sampling, then consider a batch/SIMD RNG path for workloads
+   where random generation is a bottleneck (e.g. via independent streams or
+   a counter-based backend). */
 
 CFD_INTERNAL void *cfd_arena_out_of_memory(CFD_Arena *arena, u64 size);
 
@@ -474,6 +492,53 @@ CFD_LIB void cfd_default_logger(CFD_Log_Level level, CFD_MSVC_FORMAT const char 
         default:
             break;
     }
+}
+
+CFD_INTERNAL u64 cfd_rng_splitmix64_next(u64 *state) {
+    u64 z = (*state += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+static force_inline u64 cfd_rng_rotl64(u64 value, u32 rotation) {
+    return (value << rotation) | (value >> (64 - rotation));
+}
+
+CFD_LIB void cfd_rng_seed(CFD_Rng *rng, u64 seed) {
+    if (unlikely(rng == NULL)) {
+        cfd_error("%s(): parameter 'rng' is NULL!", __func__);
+        return;
+    }
+
+    for (u32 i = 0; i < 4; ++i)
+        rng->state[i] = cfd_rng_splitmix64_next(&seed);
+}
+
+CFD_LIB u64 cfd_rng_next_u64(CFD_Rng *rng) {
+    CFD_CHECK_NULL(rng, 0);
+
+    const u64 result = rng->state[0] + rng->state[3];
+    const u64 t = rng->state[1] << 17;
+
+    rng->state[2] ^= rng->state[0];
+    rng->state[3] ^= rng->state[1];
+    rng->state[1] ^= rng->state[2];
+    rng->state[0] ^= rng->state[3];
+    rng->state[2] ^= t;
+    rng->state[3] = cfd_rng_rotl64(rng->state[3], 45);
+
+    return result;
+}
+
+CFD_LIB f32 cfd_rng_next_f32(CFD_Rng *rng) {
+    CFD_CHECK_NULL(rng, 0.0f);
+    return (f32)(cfd_rng_next_u64(rng) >> 40) * 0x1.0p-24f;
+}
+
+CFD_LIB f64 cfd_rng_next_f64(CFD_Rng *rng) {
+    CFD_CHECK_NULL(rng, 0.0);
+    return (f64)(cfd_rng_next_u64(rng) >> 11) * 0x1.0p-53;
 }
 
 
