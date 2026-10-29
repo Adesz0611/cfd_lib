@@ -286,7 +286,11 @@ CFD_LIB f64 cfd_rng_next_f64(CFD_Rng *rng);
    where random generation is a bottleneck (e.g. via independent streams or
    a counter-based backend). */
 
-CFD_INTERNAL void *cfd_arena_out_of_memory(CFD_Arena *arena, u64 size);
+static inline void *cfd_arena_out_of_memory(CFD_Arena *arena, u64 size) {
+    cfd_error("Arena out of memory! Requested: %llu, Available: %llu",
+              (unsigned long long)size, (unsigned long long)(arena->cap - arena->offset));
+    return NULL;
+}
 
 #define cfd_align_forward(offset, alignment) (((offset) + ((alignment) - 1)) & ~((alignment) - 1))
 
@@ -995,11 +999,6 @@ CFD_LIB void cfd_arena_log_usage(const char *arena_name, CFD_Arena *arena) {
 
     double percent = arena->cap ? 100.0 * (double)arena->offset / (double)arena->cap : 0.0;
     cfd_info("%s arena usage: %s / %s (%.2f%% used)", arena_name, used, capacity, percent);
-}
-
-CFD_INTERNAL void *cfd_arena_out_of_memory(CFD_Arena *arena, u64 size) {
-    cfd_error("Arena out of memory! Requested: %zu, Available: %zu", size, arena->cap - arena->offset);
-    return NULL;
 }
 
 CFD_LIB f32 *cfd_cell_data_to_node_data(CFD_Arena *arena, CFD_Arena *scratch_arena, const CFD_UnstructuredGrid *mesh, const f32 *cell_data, u8 dim) {
